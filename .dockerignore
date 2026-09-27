@@ -1,0 +1,13 @@
+.git
+.github
+.pytest_cache
+.sentinelops
+.venv
+__pycache__
+*.py[cod]
+*.db
+*.sqlite*
+.coverage
+htmlcov
+tests
+docs

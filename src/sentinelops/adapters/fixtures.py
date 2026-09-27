@@ -35,7 +35,10 @@ class FixtureEvidenceTool:
                 continue
             if spec.service and item.service != spec.service:
                 continue
-            searchable = f"{item.summary} {json.dumps(item.attributes, ensure_ascii=False)}".casefold()
+            searchable = (
+                f"{item.service} {item.source.value} {item.summary} "
+                f"{json.dumps(item.attributes, ensure_ascii=False)}"
+            ).casefold()
             if keywords and not any(keyword in searchable for keyword in keywords):
                 continue
             matches.append(item)

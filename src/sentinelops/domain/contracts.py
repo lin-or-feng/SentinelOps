@@ -26,6 +26,12 @@ class IncidentStatus(str, Enum):
     NEEDS_HUMAN = "needs_human"
 
 
+class ActionType(str, Enum):
+    QUERY = "query"
+    FINISH = "finish"
+    ESCALATE = "escalate"
+
+
 class IncidentTask(StrictModel):
     incident_id: str = Field(min_length=3, max_length=120)
     tenant_id: str = Field(min_length=1, max_length=120)
@@ -80,3 +86,36 @@ class DiagnosisReport(StrictModel):
         if self.status == IncidentStatus.DIAGNOSED and self.selected_code is None:
             raise ValueError("diagnosed reports require selected_code")
         return self
+
+
+class InvestigationAction(StrictModel):
+    action: ActionType
+    source: EvidenceSource | None = None
+    keywords: list[str] = Field(default_factory=list, max_length=20)
+    rationale: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def query_requires_source(self) -> "InvestigationAction":
+        if self.action == ActionType.QUERY and self.source is None:
+            raise ValueError("query actions require a source")
+        if self.action != ActionType.QUERY and self.source is not None:
+            raise ValueError("only query actions may specify a source")
+        return self
+
+
+class InvestigationTraceStep(StrictModel):
+    step: int = Field(ge=1)
+    action: ActionType
+    source: EvidenceSource | None = None
+    status: str = Field(min_length=1, max_length=40)
+    rationale: str = Field(min_length=1, max_length=500)
+    evidence_ids: list[str] = Field(default_factory=list)
+    duration_ms: float = Field(ge=0)
+
+
+class InvestigationResult(StrictModel):
+    trace_id: str = Field(min_length=8, max_length=120)
+    task: IncidentTask
+    report: DiagnosisReport
+    trace: list[InvestigationTraceStep]
+    degraded_components: list[str] = Field(default_factory=list)

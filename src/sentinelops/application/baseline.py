@@ -79,7 +79,7 @@ class BaselineDiagnoser:
             )
             queries += 1
 
-        candidates = self._rank(evidence)
+        candidates = rank_root_causes(evidence)
         if not candidates:
             return DiagnosisReport(
                 incident_id=task.incident_id,
@@ -98,25 +98,28 @@ class BaselineDiagnoser:
             tool_queries=queries,
         )
 
-    @staticmethod
-    def _rank(evidence: list[Evidence]) -> list[RootCauseCandidate]:
-        ranked: list[RootCauseCandidate] = []
-        for rule in RULES:
-            score = 0.0
-            matched_ids: list[str] = []
-            for item in evidence:
-                text = f"{item.summary} {json.dumps(item.attributes, ensure_ascii=False)}".casefold()
-                matches = sum(signal.casefold() in text for signal in rule.signals)
-                if matches:
-                    score += matches * SOURCE_WEIGHTS.get(item.source, 1.0) * item.reliability
-                    matched_ids.append(item.evidence_id)
-            if score:
-                ranked.append(
-                    RootCauseCandidate(
-                        code=rule.code,
-                        summary=rule.summary,
-                        evidence_ids=sorted(set(matched_ids)),
-                        score=min(1.0, round(score / 3.0, 4)),
-                    )
+
+
+def rank_root_causes(evidence: list[Evidence]) -> list[RootCauseCandidate]:
+    """Rank known root causes from normalized evidence without model calls."""
+
+    ranked: list[RootCauseCandidate] = []
+    for rule in RULES:
+        score = 0.0
+        matched_ids: list[str] = []
+        for item in evidence:
+            text = f"{item.summary} {json.dumps(item.attributes, ensure_ascii=False)}".casefold()
+            matches = sum(signal.casefold() in text for signal in rule.signals)
+            if matches:
+                score += matches * SOURCE_WEIGHTS.get(item.source, 1.0) * item.reliability
+                matched_ids.append(item.evidence_id)
+        if score:
+            ranked.append(
+                RootCauseCandidate(
+                    code=rule.code,
+                    summary=rule.summary,
+                    evidence_ids=sorted(set(matched_ids)),
+                    score=min(1.0, round(score / 3.0, 4)),
                 )
-        return sorted(ranked, key=lambda item: (-item.score, item.code))
+            )
+    return sorted(ranked, key=lambda item: (-item.score, item.code))
