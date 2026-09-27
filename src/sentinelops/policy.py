@@ -53,12 +53,12 @@ class HeuristicInvestigationPolicy:
                     ),
                 )
 
-        for source in self._source_order(state.task):
+        for source in self.source_order(state.task):
             if source not in state.queried_sources:
                 return InvestigationAction(
                     action=ActionType.QUERY,
                     source=source,
-                    keywords=self._keywords(state.task, source),
+                    keywords=self.keywords(state.task, source),
                     rationale=f"collect next independent evidence domain: {source.value}",
                 )
 
@@ -76,7 +76,7 @@ class HeuristicInvestigationPolicy:
         )
 
     @staticmethod
-    def _source_order(task: IncidentTask) -> tuple[EvidenceSource, ...]:
+    def source_order(task: IncidentTask) -> tuple[EvidenceSource, ...]:
         text = " ".join([*task.symptoms, task.service]).casefold()
         if any(term in text for term in ("release", "deploy", "version", "发布", "变更")):
             return (
@@ -100,7 +100,7 @@ class HeuristicInvestigationPolicy:
         )
 
     @staticmethod
-    def _keywords(task: IncidentTask, source: EvidenceSource) -> list[str]:
+    def keywords(task: IncidentTask, source: EvidenceSource) -> list[str]:
         words = [task.service, source.value]
         words.extend(task.symptoms[:3])
         return [word[:120] for word in words if word.strip()]

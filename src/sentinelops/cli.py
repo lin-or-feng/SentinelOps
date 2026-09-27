@@ -8,13 +8,20 @@ import sys
 from pathlib import Path
 
 from sentinelops.adapters import load_fixture_cases
-from sentinelops.application import evaluate_cases
+from sentinelops.application import (
+    ReplayDatasetError,
+    compare_orchestration,
+    evaluate_cases,
+    load_replay_suite,
+    run_replay_suite,
+)
 from sentinelops.audit import AuditLog
 from sentinelops.domain import IncidentStatus
 from sentinelops.service import create_service
 
 
 DEFAULT_DATASET = Path("evals/incidents.json")
+DEFAULT_REPLAY_DATASET = Path("evals/observability_replays.json")
 DEFAULT_DB = Path(".sentinelops/sentinelops.db")
 
 
@@ -26,10 +33,29 @@ def build_parser() -> argparse.ArgumentParser:
     baseline.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     baseline.add_argument("--min-top1", type=float, default=1.0)
 
+    replay = subparsers.add_parser(
+        "replay-check",
+        help="validate privacy-gated observability response replays",
+    )
+    replay.add_argument("--dataset", type=Path, default=DEFAULT_REPLAY_DATASET)
+
+    orchestration_eval = subparsers.add_parser(
+        "orchestration-eval",
+        help="compare bounded single and multi-agent orchestration",
+    )
+    orchestration_eval.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    orchestration_eval.add_argument("--min-top1", type=float, default=1.0)
+    orchestration_eval.add_argument("--provider-delay-ms", type=float, default=25.0)
+
     investigate = subparsers.add_parser("investigate", help="run one bounded investigation")
     investigate.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     investigate.add_argument("--db", type=Path, default=DEFAULT_DB)
     investigate.add_argument("--incident-id", required=True)
+    investigate.add_argument(
+        "--orchestration-mode",
+        choices=("single", "multi", "auto"),
+        default=None,
+    )
 
     verify = subparsers.add_parser("audit-verify", help="verify the append-only audit chain")
     verify.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
@@ -40,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--db", type=Path, default=DEFAULT_DB)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument(
+        "--orchestration-mode",
+        choices=("single", "multi", "auto"),
+        default=None,
+    )
     return parser
 
 
@@ -67,6 +98,32 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(summary.as_dict(), ensure_ascii=False, indent=2))
         return 0 if summary.top1_accuracy >= args.min_top1 and summary.evidence_validity == 1.0 else 1
 
+    if args.command == "replay-check":
+        try:
+            summary = run_replay_suite(load_replay_suite(args.dataset))
+        except ReplayDatasetError as exc:
+            print(json.dumps({"valid": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+            return 2
+        print(json.dumps(summary.as_dict(), ensure_ascii=False, indent=2))
+        return 0 if summary.valid else 1
+
+    if args.command == "orchestration-eval":
+        summary = compare_orchestration(
+            load_fixture_cases(args.dataset),
+            provider_delay_ms=args.provider_delay_ms,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        single = summary["single"]
+        multi = summary["multi"]
+        auto = summary["auto"]
+        assert isinstance(single, dict) and isinstance(multi, dict) and isinstance(auto, dict)
+        valid = all(
+            float(item["top1_accuracy"]) >= args.min_top1
+            and float(item["evidence_validity"]) == 1.0
+            for item in (single, multi, auto)
+        )
+        return 0 if valid else 1
+
     if args.command == "serve":
         if not _is_loopback_host(args.host) and not os.getenv("SENTINELOPS_API_TOKEN"):
             print(
@@ -82,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
             dataset_path=args.dataset,
             db_path=args.db,
             audit_key=_audit_key(),
+            orchestration_mode=args.orchestration_mode,
         )
         uvicorn.run(app, host=args.host, port=args.port, workers=1)
         return 0
@@ -95,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         dataset_path=args.dataset,
         db_path=args.db,
         audit_key=_audit_key(),
+        orchestration_mode=args.orchestration_mode,
     )
 
     cases = load_fixture_cases(args.dataset)

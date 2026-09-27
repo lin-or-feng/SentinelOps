@@ -1,0 +1,140 @@
+{
+  "schema_version": "1.0",
+  "privacy_policy": "sentinelops-privacy-v1",
+  "cases": [
+    {
+      "case_id": "prometheus-vector-success",
+      "provider": "prometheus",
+      "origin": "synthetic",
+      "captured_at": "2026-09-27T02:30:00Z",
+      "query": {
+        "incident_id": "replay-metrics-001",
+        "source": "metrics",
+        "service": "order-service",
+        "keywords": [],
+        "limit": 5,
+        "start_time": "2026-09-27T02:00:00Z",
+        "end_time": "2026-09-27T02:20:00Z"
+      },
+      "response_status": 200,
+      "response_payload": {
+        "status": "success",
+        "data": {
+          "resultType": "vector",
+          "result": [
+            {
+              "metric": {"__name__": "db_waiting", "service": "order-service"},
+              "value": [1790474400, "84"]
+            }
+          ]
+        }
+      },
+      "expected_schema_fingerprint": "97b186ec60db42b84f3c05b63da1586ace386a80cfd6c9fefef876e308b86ce5",
+      "expected_outcome": "success",
+      "expected_evidence_count": 1
+    },
+    {
+      "case_id": "loki-stream-success",
+      "provider": "loki",
+      "origin": "synthetic",
+      "captured_at": "2026-09-27T02:30:00Z",
+      "query": {
+        "incident_id": "replay-logs-001",
+        "source": "logs",
+        "service": "order-service",
+        "keywords": [],
+        "limit": 5,
+        "start_time": "2026-09-27T02:00:00Z",
+        "end_time": "2026-09-27T02:20:00Z"
+      },
+      "response_status": 200,
+      "response_payload": {
+        "status": "success",
+        "data": {
+          "resultType": "streams",
+          "result": [
+            {
+              "stream": {"service": "order-service", "level": "error"},
+              "values": [["1790474400000000000", "database pool timeout"]]
+            }
+          ]
+        }
+      },
+      "expected_schema_fingerprint": "644dd17dbe201a38876c0de7a4bad96410a141bb05d07596639a2dac82036d90",
+      "expected_outcome": "success",
+      "expected_evidence_count": 1
+    },
+    {
+      "case_id": "tempo-search-success",
+      "provider": "tempo",
+      "origin": "synthetic",
+      "captured_at": "2026-09-27T02:30:00Z",
+      "query": {
+        "incident_id": "replay-traces-001",
+        "source": "traces",
+        "service": "order-service",
+        "keywords": [],
+        "limit": 5,
+        "start_time": "2026-09-27T02:00:00Z",
+        "end_time": "2026-09-27T02:20:00Z"
+      },
+      "response_status": 200,
+      "response_payload": {
+        "traces": [
+          {
+            "traceID": "trace-replay-001",
+            "rootTraceName": "database connection wait",
+            "startTimeUnixNano": "1790474400000000000",
+            "durationMs": 4800
+          }
+        ]
+      },
+      "expected_schema_fingerprint": "cc70141d8c92ae52462d16a1ed284d1c4065a21bba892a164fe23ec2d7c41efd",
+      "expected_outcome": "success",
+      "expected_evidence_count": 1
+    },
+    {
+      "case_id": "prometheus-retryable-503",
+      "provider": "prometheus",
+      "origin": "synthetic",
+      "captured_at": "2026-09-27T02:30:00Z",
+      "query": {
+        "incident_id": "replay-metrics-503",
+        "source": "metrics",
+        "service": "order-service",
+        "keywords": [],
+        "limit": 5,
+        "start_time": "2026-09-27T02:00:00Z",
+        "end_time": "2026-09-27T02:20:00Z"
+      },
+      "response_status": 503,
+      "response_payload": {"status": "error", "errorType": "unavailable"},
+      "expected_schema_fingerprint": "4804462d6a1c1030ef555ad2a8f900c7a5c424bc8c9c5bdd720110503f071e7f",
+      "expected_outcome": "retryable_error",
+      "expected_evidence_count": 0
+    },
+    {
+      "case_id": "loki-schema-error",
+      "provider": "loki",
+      "origin": "synthetic",
+      "captured_at": "2026-09-27T02:30:00Z",
+      "query": {
+        "incident_id": "replay-logs-schema",
+        "source": "logs",
+        "service": "order-service",
+        "keywords": [],
+        "limit": 5,
+        "start_time": "2026-09-27T02:00:00Z",
+        "end_time": "2026-09-27T02:20:00Z"
+      },
+      "response_status": 200,
+      "response_payload": {
+        "status": "success",
+        "data": {"resultType": "streams", "result": {"unexpected": "object"}}
+      },
+      "expected_schema_fingerprint": "a72578e943f089d3d17e7ae29e8741c1f13b2cdb77b852a89778e3ce8356543f",
+      "expected_outcome": "schema_error",
+      "expected_evidence_count": 0
+    }
+  ]
+}

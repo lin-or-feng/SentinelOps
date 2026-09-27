@@ -3,6 +3,7 @@ import hashlib
 import pytest
 
 from sentinelops.privacy import redact_private_text, scan_content
+from scripts.privacy_guard import scan_worktree
 
 
 def rules(path: str, data: bytes) -> set[str]:
@@ -75,3 +76,14 @@ def test_redacts_private_text_before_persistence() -> None:
     assert phone not in redacted
     assert email not in redacted
     assert redacted.count("[REDACTED:") == 2
+
+
+def test_worktree_scan_includes_untracked_candidate_files(tmp_path) -> None:
+    phone = "138" + "0013" + "8000"
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(f'{{"value": "{phone}"}}', encoding="utf-8")
+
+    findings = scan_worktree([candidate.name], frozenset(), root=tmp_path)
+
+    assert {finding.rule for finding in findings} == {"PRC mobile number"}
+    assert phone not in "\n".join(finding.display() for finding in findings)

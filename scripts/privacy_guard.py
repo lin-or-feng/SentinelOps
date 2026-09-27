@@ -65,6 +65,29 @@ def scan_index(paths: list[str], allowed_hashes: frozenset[str]) -> list[Privacy
     return findings
 
 
+def scan_worktree(
+    paths: list[str],
+    allowed_hashes: frozenset[str],
+    *,
+    root: Path = ROOT,
+) -> list[PrivacyFinding]:
+    findings: list[PrivacyFinding] = []
+    for path in paths:
+        candidate = root / path
+        if candidate.is_symlink():
+            findings.append(PrivacyFinding(path, "unreviewed symbolic link"))
+            continue
+        if not candidate.is_file():
+            continue
+        try:
+            data = candidate.read_bytes()
+        except OSError:
+            findings.append(PrivacyFinding(path, "worktree file could not be scanned"))
+            continue
+        findings.extend(scan_content(path, data, allowed_binary_sha256=allowed_hashes))
+    return findings
+
+
 def scan_commit(commit: str, allowed_hashes: frozenset[str]) -> list[PrivacyFinding]:
     findings: list[PrivacyFinding] = []
     metadata = git_bytes("show", "-s", "--format=%ae%n%ce", commit).decode(
@@ -135,6 +158,11 @@ def parse_args() -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--staged", action="store_true", help="scan the staged Git index")
     mode.add_argument("--tracked", action="store_true", help="scan all tracked Git index files")
+    mode.add_argument(
+        "--worktree",
+        action="store_true",
+        help="scan tracked and untracked non-ignored worktree files",
+    )
     mode.add_argument("--pre-push", metavar="REMOTE", help="scan commits received on stdin")
     parser.add_argument("--check-identity", action="store_true")
     return parser.parse_args()
@@ -149,6 +177,11 @@ def main() -> int:
                 git_bytes("diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z")
             )
             findings = scan_index(paths, allowed_hashes)
+        elif args.worktree:
+            paths = split_null(
+                git_bytes("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+            )
+            findings = scan_worktree(paths, allowed_hashes)
         elif args.tracked:
             findings = scan_index(split_null(git_bytes("ls-files", "-z")), allowed_hashes)
         else:

@@ -31,6 +31,29 @@ class ActionType(str, Enum):
     ESCALATE = "escalate"
 
 
+class OrchestrationMode(str, Enum):
+    SINGLE = "single"
+    MULTI = "multi"
+    AUTO = "auto"
+
+
+class InvestigatorStatus(str, Enum):
+    OK = "ok"
+    ERROR = "error"
+    TIMEOUT = "timeout"
+
+
+class OrchestrationDecision(StrictModel):
+    selected_mode: OrchestrationMode
+    reasons: list[str] = Field(min_length=1, max_length=10)
+
+    @model_validator(mode="after")
+    def selected_mode_must_be_executable(self) -> "OrchestrationDecision":
+        if self.selected_mode == OrchestrationMode.AUTO:
+            raise ValueError("an orchestration decision must resolve auto to single or multi")
+        return self
+
+
 class IncidentTask(StrictModel):
     incident_id: str = Field(min_length=3, max_length=120)
     tenant_id: str = Field(min_length=1, max_length=120)
@@ -62,6 +85,13 @@ class QuerySpec(StrictModel):
         return self
 
 
+class InvestigatorAssignment(StrictModel):
+    assignment_id: str = Field(min_length=8, max_length=120)
+    actor: str = Field(min_length=3, max_length=80)
+    query: QuerySpec
+    deadline_seconds: float = Field(gt=0, le=300)
+
+
 class Evidence(StrictModel):
     evidence_id: str = Field(min_length=3, max_length=160)
     incident_id: str = Field(min_length=3, max_length=120)
@@ -74,11 +104,59 @@ class Evidence(StrictModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
+class InvestigatorFinding(StrictModel):
+    assignment_id: str = Field(min_length=8, max_length=120)
+    actor: str = Field(min_length=3, max_length=80)
+    incident_id: str = Field(min_length=3, max_length=120)
+    service: str = Field(min_length=1, max_length=120)
+    source: EvidenceSource
+    status: InvestigatorStatus
+    evidence: list[Evidence] = Field(default_factory=list, max_length=100)
+    error_type: str | None = Field(default=None, max_length=120)
+    duration_ms: float = Field(ge=0)
+
+    @model_validator(mode="after")
+    def evidence_must_match_assignment_scope(self) -> "InvestigatorFinding":
+        if self.status == InvestigatorStatus.OK and self.error_type is not None:
+            raise ValueError("successful findings cannot include error_type")
+        if self.status != InvestigatorStatus.OK and self.evidence:
+            raise ValueError("failed findings cannot include evidence")
+        for item in self.evidence:
+            if (
+                item.incident_id != self.incident_id
+                or item.service != self.service
+                or item.source != self.source
+            ):
+                raise ValueError("finding evidence escaped its assignment scope")
+        return self
+
+
 class RootCauseCandidate(StrictModel):
     code: str = Field(min_length=2, max_length=120)
     summary: str = Field(min_length=1, max_length=500)
     evidence_ids: list[str] = Field(default_factory=list)
     score: float = Field(ge=0.0, le=1.0)
+
+
+class EvidenceReview(StrictModel):
+    status: IncidentStatus
+    candidates: list[RootCauseCandidate] = Field(default_factory=list, max_length=10)
+    selected_code: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list, max_length=100)
+    supporting_sources: list[EvidenceSource] = Field(default_factory=list, max_length=10)
+    rationale: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def diagnosis_requires_supported_candidate(self) -> "EvidenceReview":
+        candidate_codes = {candidate.code for candidate in self.candidates}
+        if self.selected_code is not None and self.selected_code not in candidate_codes:
+            raise ValueError("review selected_code must reference a candidate")
+        if self.status == IncidentStatus.DIAGNOSED:
+            if self.selected_code is None or len(set(self.supporting_sources)) < 2:
+                raise ValueError("diagnosed reviews require two independent evidence sources")
+        elif self.selected_code is not None:
+            raise ValueError("needs_human reviews cannot select a root cause")
+        return self
 
 
 class DiagnosisReport(StrictModel):
@@ -117,6 +195,7 @@ class InvestigationAction(StrictModel):
 
 class InvestigationTraceStep(StrictModel):
     step: int = Field(ge=1)
+    actor: str = Field(default="investigation-agent", min_length=3, max_length=80)
     action: ActionType
     source: EvidenceSource | None = None
     status: str = Field(min_length=1, max_length=40)
@@ -127,6 +206,7 @@ class InvestigationTraceStep(StrictModel):
 
 class InvestigationResult(StrictModel):
     trace_id: str = Field(min_length=8, max_length=120)
+    orchestration_mode: OrchestrationMode = OrchestrationMode.SINGLE
     task: IncidentTask
     report: DiagnosisReport
     trace: list[InvestigationTraceStep]

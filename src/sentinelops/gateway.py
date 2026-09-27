@@ -10,9 +10,14 @@ from typing import Callable
 from sentinelops.audit import AuditLog
 from sentinelops.domain import Evidence, EvidenceSource, QuerySpec
 from sentinelops.ports import EvidenceTool
+from sentinelops.telemetry import OperationalMetrics
 
 
 class EvidenceToolError(RuntimeError):
+    pass
+
+
+class EvidenceContractError(EvidenceToolError):
     pass
 
 
@@ -56,6 +61,7 @@ class EvidenceGateway:
         policy: GatewayPolicy,
         *,
         clock: Callable[[], float] = time.monotonic,
+        metrics: OperationalMetrics | None = None,
     ) -> None:
         if not getattr(tool, "read_only", False):
             raise ValueError("evidence gateway accepts read-only tools only")
@@ -63,8 +69,30 @@ class EvidenceGateway:
         self._audit = audit
         self._policy = policy
         self._clock = clock
+        self._metrics = metrics
         self._circuit_lock = threading.Lock()
         self._circuits = {source: _CircuitState() for source in policy.allowed_sources}
+        if metrics is not None:
+            for source in policy.allowed_sources:
+                metrics.set_circuit(source, opened=False)
+
+    def _record_metrics(
+        self,
+        source: EvidenceSource,
+        *,
+        status: str,
+        started: float,
+        circuit_opened: bool | None = None,
+    ) -> None:
+        if self._metrics is None:
+            return
+        self._metrics.record_provider(
+            source=source,
+            status=status,
+            duration_seconds=time.perf_counter() - started,
+        )
+        if circuit_opened is not None:
+            self._metrics.set_circuit(source, opened=circuit_opened)
 
     def _reserve_circuit(self, source: EvidenceSource) -> _CircuitDecision:
         with self._circuit_lock:
@@ -122,7 +150,9 @@ class EvidenceGateway:
             return False
 
     def query(self, spec: QuerySpec, *, trace_id: str, actor: str = "investigation-agent") -> list[Evidence]:
+        started = time.perf_counter()
         if spec.source not in self._policy.allowed_sources:
+            self._record_metrics(spec.source, status="denied", started=started)
             self._audit.append(
                 trace_id=trace_id,
                 actor=actor,
@@ -135,6 +165,12 @@ class EvidenceGateway:
 
         circuit = self._reserve_circuit(spec.source)
         if not circuit.allowed:
+            self._record_metrics(
+                spec.source,
+                status="circuit_open",
+                started=started,
+                circuit_opened=True,
+            )
             self._audit.append(
                 trace_id=trace_id,
                 actor=actor,
@@ -149,12 +185,44 @@ class EvidenceGateway:
             raise EvidenceToolError(f"{spec.source.value} evidence circuit is open")
 
         attempts = max(1, min(self._policy.max_attempts, 3))
-        started = time.perf_counter()
         for attempt in range(1, attempts + 1):
             try:
                 bounded_spec = spec.model_copy(update={"limit": min(spec.limit, self._policy.max_results)})
                 evidence = self._tool.query(bounded_spec)[: self._policy.max_results]
+                if any(
+                    item.incident_id != bounded_spec.incident_id
+                    or item.source != bounded_spec.source
+                    or (bounded_spec.service is not None and item.service != bounded_spec.service)
+                    for item in evidence
+                ):
+                    circuit_opened = self._record_failure(spec.source, circuit)
+                    self._record_metrics(
+                        spec.source,
+                        status="error",
+                        started=started,
+                        circuit_opened=circuit_opened,
+                    )
+                    self._audit.append(
+                        trace_id=trace_id,
+                        actor=actor,
+                        action="tool_query",
+                        resource=spec.source.value,
+                        status="error",
+                        details={
+                            "attempt": attempt,
+                            "error_type": "EvidenceContractError",
+                            "retryable": False,
+                            "circuit_opened": circuit_opened,
+                        },
+                    )
+                    raise EvidenceContractError("evidence response escaped the query scope")
                 self._record_success(spec.source, circuit)
+                self._record_metrics(
+                    spec.source,
+                    status="ok",
+                    started=started,
+                    circuit_opened=False,
+                )
                 self._audit.append(
                     trace_id=trace_id,
                     actor=actor,
@@ -172,6 +240,12 @@ class EvidenceGateway:
             except (TimeoutError, ConnectionError, OSError) as exc:
                 if attempt >= attempts:
                     circuit_opened = self._record_failure(spec.source, circuit)
+                    self._record_metrics(
+                        spec.source,
+                        status="error",
+                        started=started,
+                        circuit_opened=circuit_opened,
+                    )
                     self._audit.append(
                         trace_id=trace_id,
                         actor=actor,
@@ -186,8 +260,16 @@ class EvidenceGateway:
                     )
                     raise EvidenceToolError(f"{spec.source.value} evidence query failed") from exc
                 time.sleep(0.01 * attempt)
+            except EvidenceContractError:
+                raise
             except Exception as exc:
                 circuit_opened = self._record_failure(spec.source, circuit)
+                self._record_metrics(
+                    spec.source,
+                    status="error",
+                    started=started,
+                    circuit_opened=circuit_opened,
+                )
                 self._audit.append(
                     trace_id=trace_id,
                     actor=actor,

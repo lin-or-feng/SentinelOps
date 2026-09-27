@@ -1,4 +1,4 @@
-# SentinelOps 0.3.1 架构
+# SentinelOps 0.4.1 架构
 
 ## 1. 设计目标与非目标
 
@@ -9,9 +9,9 @@
 ## 2. 分层与依赖方向
 
 ```text
-Presentation: CLI / FastAPI
+Presentation: CLI / API Edge / FastAPI
             |
-Application: Service / Bounded Agent / Policy / Evaluation
+Application: Service / Single Agent / Multi-Agent Supervisor / Reviewer / Evaluation
             |
 Domain: strict Pydantic contracts
             |
@@ -59,26 +59,34 @@ START
 
 | 边界 | 当前控制 | 仍需生产化 |
 |---|---|---|
-| API 调用方 | 可选静态 Bearer、常量时间比较 | OIDC、租户 RBAC、密钥轮换、速率限制 |
+| API 调用方 | 可选静态 Bearer、常量时间比较、精确 Host/CORS、请求体/RPM/并发边界、安全响应头 | OIDC、租户 RBAC、密钥轮换、TLS、跨副本租户配额与 DDoS 防护 |
 | 工具调用 | read-only 标志、来源白名单、Pydantic 参数、结果上限 | 每个真实提供方的最小权限凭据与 egress 控制 |
-| Agent 运行时 | 步骤/查询/时间/重复动作预算、按来源熔断 | 异步任务、租户配额、取消与背压 |
+| Agent 运行时 | 单 Agent 循环；可选 Supervisor/专项 Worker/Reviewer；共享查询/时间预算、按来源熔断 | 持久化异步任务、租户配额、强制取消与跨副本背压 |
 | 持久化 | SQLite 参数化 SQL、事故 ID 幂等 | PostgreSQL 事务、租户行级安全、备份恢复 |
 | 审计 | 脱敏、前向哈希链、可选 HMAC | KMS 托管密钥、不可变外部归档、多副本串行化 |
 | 容器 | non-root、只读 rootfs、drop capabilities | 镜像签名、SBOM、漏洞扫描、网络策略 |
 
 FastAPI lifespan 在退出时关闭自有 HTTP 连接池。`/healthz` 是不访问依赖的存活探针；`/readyz` 仅检查本地 SQLite，不对外部 provider 发请求，避免探针放大故障或消耗监控配额。
 
-## 6. 为什么现在仍是单 Agent
+Provider 契约另有一条完全离线的回放路径：`ReplaySuite -> 隐私扫描 -> 严格契约 -> 结构指纹 -> MockTransport -> Provider -> Evidence/受控异常`。回放不经过真实 DNS 或网络，不包含认证头，并在统一发布门禁中先于事故基线执行。结构指纹只散列字段名和 JSON 类型，不散列业务值；任何形状变化都要求人工评审后更新批准指纹。
 
-当前问题是有条件分支的只读调查，并不天然要求多 Agent。单 Agent 已能动态选择数据源、在证据充分时提前停止，并提供统一预算和审计。过早拆分会增加消息协议、并发冲突、重复查询、审计合并和成本归因难度。
+自身可观测性是旁路能力，不参与诊断决策：HTTP middleware 生成或校验请求 ID，记录固定路由模板、状态和耗时；Service 记录调查结果；Gateway 记录 Provider 结果、耗时和熔断 Gauge。三层共享进程内线程安全 Registry，并通过显式开启的 `/metrics` 输出 Prometheus 0.0.4 文本。所有 label 都来自代码内有限枚举，不接收事故、租户、请求 ID 或异常正文。
 
-0.3 以后只有在固定评测证明“单 Agent 无法同时达到召回、时延与查询成本目标”时，才拆出 Metrics/Logs/Changes 调查者；它们必须共享结构化证据存储，不共享无限聊天历史。
+API 边界同样位于领域逻辑之外：请求先经过全局并发准入与 60 秒滑动窗口，再经过实际请求字节上限、精确 CORS 和 Trusted Host。拒绝结果仍进入请求关联、固定安全响应头和低基数指标。当前计数状态只在单进程内共享，故与 `--workers 1` 部署契约一致；多副本前必须迁移到入口网关/Redis 和经过认证的租户配额键。
+
+## 6. 单 Agent 与多 Agent 的边界
+
+默认 `single` 使用同一个有界循环动态选择来源，在证据充分时提前停止，查询成本较低。可选 `multi` 使用 Supervisor 每波并发派发两个来源受限的专项调查员，并由独立 EvidenceReviewer 合并证据。`auto` 在查询预算允许的前提下，只对紧截止时间、多条跨域症状或多项独立症状选择 multi。三种配置共享 Domain、Gateway、Store、Audit 和评测集，不存在多套安全边界。
+
+Multi 模式中的消息是 `InvestigatorAssignment -> InvestigatorFinding -> EvidenceReview`，不是无限聊天历史。Worker 只能访问一个 EvidenceSource；Supervisor 共享事故级查询预算与截止时间；Reviewer 至少要求两个独立来源。单 Worker 故障被记录为降级，必要时进入下一波。
+
+当前 4 条 Fixture 消融中三种配置准确率和证据有效率均为 100%；强制 multi 平均多用 0.5 次查询，auto 对全部简单案例保留 single，因此查询成本与 single 一致。另有复杂跨域契约测试确认 auto 会选择 multi。由于 Fixture 规模很小，默认仍保持 single；真实环境切换前必须用组织自己的 Provider 延迟和事故集复测。
 
 ## 7. 演进路线
 
-- Prometheus/Loki/Tempo 已通过统一 `EvidenceTool` 接入；下一步增加脱敏回放集与 schema 漂移检测；
+- Prometheus/Loki/Tempo 已通过统一 `EvidenceTool` 接入，并由脱敏回放集验证 Schema 与错误分类；下一步扩展未知字段、超时和冲突证据样本；
 - SQLite -> PostgreSQL，使用租户键、唯一约束与事务 outbox；
 - 同步请求 -> 持久化任务队列，支持取消、重试、死信和背压；
 - 静态 Bearer -> OIDC/OAuth2 + RBAC；
 - 本地日志 -> OpenTelemetry traces/metrics/logs 和独立审计归档；
-- 确定性 Policy -> 受约束模型 Policy，输出结构化动作，验证失败回退规则策略。
+- 确定性 single/multi Policy -> 受约束模型 Policy，只输出结构化动作或来源优先级，验证失败回退规则策略。

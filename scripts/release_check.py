@@ -24,7 +24,7 @@ def run(*args: str) -> None:
 
 def main() -> int:
     run("-m", "compileall", "-q", "src", "tests", "scripts")
-    run(str(ROOT / "scripts" / "privacy_guard.py"), "--tracked")
+    run(str(ROOT / "scripts" / "privacy_guard.py"), "--worktree")
     run(str(ROOT / "scripts" / "static_audit.py"))
     run(
         "-m",
@@ -33,7 +33,15 @@ def main() -> int:
         "--cov-report=term-missing",
         "--cov-fail-under=80",
     )
+    run(
+        "-m",
+        "sentinelops",
+        "replay-check",
+        "--dataset",
+        str(ROOT / "evals" / "observability_replays.json"),
+    )
     run("-m", "sentinelops", "baseline", "--min-top1", "1.0")
+    run("-m", "sentinelops", "orchestration-eval", "--min-top1", "1.0")
     print("\nSentinelOps release gate passed.")
     return 0
 

@@ -16,6 +16,7 @@ from sentinelops.domain import (
     IncidentTask,
     InvestigationResult,
     InvestigationTraceStep,
+    OrchestrationMode,
     QuerySpec,
 )
 from sentinelops.gateway import EvidenceGateway, EvidenceToolError
@@ -32,6 +33,8 @@ class AgentConfig:
 
 
 class BoundedInvestigationAgent:
+    orchestration_mode = OrchestrationMode.SINGLE
+
     def __init__(
         self,
         gateway: EvidenceGateway,
@@ -46,8 +49,14 @@ class BoundedInvestigationAgent:
         self.policy = policy or HeuristicInvestigationPolicy()
         self.config = config or AgentConfig()
 
-    def run(self, task: IncidentTask) -> InvestigationResult:
-        trace_id = f"trace-{uuid.uuid4().hex}"
+    def run(
+        self,
+        task: IncidentTask,
+        *,
+        request_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> InvestigationResult:
+        trace_id = trace_id or f"trace-{uuid.uuid4().hex}"
         state = InvestigationState(task=task)
         trace: list[InvestigationTraceStep] = []
         degraded: list[str] = []
@@ -56,13 +65,20 @@ class BoundedInvestigationAgent:
             max_queries=min(self.config.max_queries, task.query_budget),
             deadline_seconds=min(self.config.deadline_seconds, float(task.deadline_seconds)),
         )
+        start_details: dict[str, object] = {
+            "service": task.service,
+            "orchestration_mode": self.orchestration_mode.value,
+            "query_budget": budget.max_queries,
+        }
+        if request_id is not None:
+            start_details["request_id"] = request_id
         self.audit.append(
             trace_id=trace_id,
             actor="investigation-agent",
             action="investigation_started",
             resource=task.incident_id,
             status="ok",
-            details={"service": task.service, "query_budget": budget.max_queries},
+            details=start_details,
         )
 
         forced_status: IncidentStatus | None = None
@@ -154,18 +170,21 @@ class BoundedInvestigationAgent:
             degraded_components=sorted(set(degraded)),
         )
         self.store.save(result)
+        completion_details: dict[str, object] = {
+            "selected_code": report.selected_code,
+            "evidence_count": len(report.evidence_ids),
+            "tool_queries": report.tool_queries,
+            "degraded_components": result.degraded_components,
+        }
+        if request_id is not None:
+            completion_details["request_id"] = request_id
         self.audit.append(
             trace_id=trace_id,
             actor="investigation-agent",
             action="investigation_completed",
             resource=task.incident_id,
             status=report.status.value,
-            details={
-                "selected_code": report.selected_code,
-                "evidence_count": len(report.evidence_ids),
-                "tool_queries": report.tool_queries,
-                "degraded_components": result.degraded_components,
-            },
+            details=completion_details,
         )
         return result
 

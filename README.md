@@ -1,10 +1,10 @@
-# SentinelOps 0.3.1
+# SentinelOps 0.4.1
 
 SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围绕真实生产约束设计：Agent 只能查询指标、日志、链路和变更记录；每次调查受步骤、查询次数和截止时间限制；结论必须引用证据；证据不足时升级人工，而不是编造根因。
 
-当前版本是**可复现的单 Agent 主体闭环**，不是生产事故平台。默认使用 Fixture 做离线评测，不访问外部系统；显式启用 observability 模式后，可通过同一领域契约连接 Prometheus、Loki、Tempo 的只读 API。
+当前版本提供**可复现的单 Agent 基线 + 可选有界多 Agent 协作 + 成本感知自动路由**，不是生产事故平台。默认使用 Fixture 做离线评测，不访问外部系统；显式启用 observability 模式后，可通过同一领域契约连接 Prometheus、Loki、Tempo 的只读 API。
 
-## 0.3.1 已完成能力
+## 0.4.1 已完成能力
 
 - **调查编排**：`观察 -> 选择只读数据源 -> 查询 -> 更新证据 -> 诊断/升级人工`；
 - **有界执行**：限制最大步骤、查询次数、截止时间和重复动作；
@@ -16,8 +16,14 @@ SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围�
 - **服务接口**：FastAPI、Bearer Token 可选认证、OpenAPI、存活/就绪探针和连接池关闭生命周期；
 - **可复现交付**：非 root Docker 镜像、只读容器文件系统、最小 Linux capability；
 - **质量门禁**：离线基线、单元/集成测试、覆盖率下限、敏感信息与危险调用扫描。
-- **隐私防上传**：提交前扫描暂存内容，推送前扫描新增提交，CI 再扫描全部跟踪文件；命中时只显示文件、行号和规则，不回显隐私值。
+- **隐私防上传**：发布门禁扫描工作树候选文件（含未跟踪文件），提交前扫描暂存内容，推送前扫描新增提交，CI 再扫描全部内容；命中时只显示文件、行号和规则，不回显隐私值。
 - **真实只读适配器**：Prometheus 指标、Loki 日志、Tempo 链路统一归一化为 `Evidence`；HTTPS、主机 allowlist、禁止重定向、超时和响应体上限默认启用。
+- **脱敏故障回放**：5 个 Provider 成功/失败契约通过无网络 `MockTransport` 离线复现；隐私门禁、结构指纹与 Schema 漂移检查已纳入统一发布门禁。
+- **自身可观测性**：安全 `X-Request-ID` 与调查 Trace 关联；结构化请求日志；可选 Prometheus 文本指标覆盖 HTTP、调查结果、Provider 延迟与熔断状态，标签采用固定低基数枚举。
+- **API 边界加固**：实际请求字节上限、进程内滑动窗口 RPM、非阻塞并发上限、精确 Host/CORS allowlist 与统一安全响应头；健康/就绪/指标探针不占业务配额。
+- **多 Agent 协作**：Supervisor 按两人波次并发派发 Metrics/Logs/Traces/Changes 专项调查员，Reviewer 统一去重与双来源门控；共享查询预算、失败隔离、结构化角色消息和全链路审计。
+- **编排消融**：同一事故集比较 single/multi 的准确率、证据有效率、查询成本和受控 Provider 延迟，不把并发吞吐误写成准确率收益。
+- **自适应编排**：`auto` 根据查询预算、截止时间、多条跨域症状决定 single/multi；简单事故优先低成本单 Agent，选择理由进入关联审计链。
 
 ## 架构速览
 
@@ -26,7 +32,8 @@ CLI / FastAPI
      |
 SentinelOpsService ── 幂等与冲突边界
      |
-BoundedInvestigationAgent ── 步数 / 查询 / 时间预算
+single: BoundedInvestigationAgent
+multi:  Supervisor -> Specialist Workers -> EvidenceReviewer
      |                 |
 InvestigationPolicy   EvidenceGateway ── 只读 / 白名单 / 重试 / 熔断 / 审计
                            |
@@ -59,6 +66,13 @@ $env:SENTINELOPS_AUDIT_KEY = "请换成长随机值"
 # API（默认仅监听本机）
 $env:SENTINELOPS_API_TOKEN = "请换成长随机值"
 .\.venv\Scripts\python.exe -m sentinelops serve --host 127.0.0.1 --port 8000
+
+# 可选：启用有界多 Agent 编排
+$env:SENTINELOPS_ORCHESTRATION_MODE = "multi"
+.\.venv\Scripts\python.exe -m sentinelops serve --host 127.0.0.1 --port 8000
+
+# 推荐评估模式：按事故复杂度自动选择 single / multi
+$env:SENTINELOPS_ORCHESTRATION_MODE = "auto"
 ```
 
 启动后可访问：
@@ -67,6 +81,49 @@ $env:SENTINELOPS_API_TOKEN = "请换成长随机值"
 - 就绪检查：`http://127.0.0.1:8000/readyz`
 - Swagger：`http://127.0.0.1:8000/docs`
 - OpenAPI：`http://127.0.0.1:8000/openapi.json`
+
+### 可选运行指标
+
+指标端点默认关闭。只在本机或受网络策略保护的抓取路径启用：
+
+```powershell
+$env:SENTINELOPS_METRICS_ENABLED = "1"
+.\.venv\Scripts\python.exe -m sentinelops serve --host 127.0.0.1 --port 8000
+Invoke-WebRequest http://127.0.0.1:8000/metrics
+```
+
+指标只使用固定路由模板、HTTP 状态类别、Provider 来源和有限结果枚举；不会将 incident ID、tenant、请求 ID、异常正文或 URL 查询参数写入 label。客户端可发送 8–64 位安全 `X-Request-ID`，服务会在响应中回传；非法格式或命中隐私规则的值会被替换。调查接口还返回 `X-SentinelOps-Trace-ID`，用于关联审计链。详细指标与建议 SLO 见 [自身可观测性](docs/SELF_OBSERVABILITY.md)。
+
+### API 边界配置
+
+默认每个进程最多接受 60 次/分钟业务请求、16 个同时在途业务请求和 1 MB 请求体。Host 和 CORS 都使用精确 allowlist，通配符会使应用启动失败：
+
+```powershell
+$env:SENTINELOPS_MAX_REQUEST_BYTES = "1000000"
+$env:SENTINELOPS_RATE_LIMIT_RPM = "60"
+$env:SENTINELOPS_MAX_INFLIGHT = "16"
+$env:SENTINELOPS_TRUSTED_HOSTS = "127.0.0.1,localhost"
+$env:SENTINELOPS_CORS_ORIGINS = "http://127.0.0.1:8501"
+```
+
+限流和并发槽位是单进程保护，不是跨副本或按租户配额。公网入口仍需 TLS、身份系统和边缘 DDoS 防护。配置约束、响应语义与升级条件见 [API 边界安全](docs/API_EDGE_SECURITY.md)。
+
+## 有界多 Agent 模式
+
+```powershell
+# 单次多 Agent 调查
+.\.venv\Scripts\python.exe -m sentinelops investigate `
+  --incident-id inc-deploy-001 --orchestration-mode multi
+
+# single / multi / auto 消融；25 ms 是每次 Provider 查询的受控模拟等待
+.\.venv\Scripts\python.exe -m sentinelops orchestration-eval --provider-delay-ms 25
+```
+
+这不是把四个查询函数换成 Agent 名称：每个专项调查员具有独立 actor、唯一 assignment、固定数据源权限和严格 `InvestigatorFinding` 返回契约；Supervisor 管理共享预算与分波并发；Reviewer 独立执行置信度和双来源证据门控。返回结果带 `orchestration_mode`，每个 TraceStep 带 `actor`，派工、查询、完成、评审和降级均进入 HMAC 审计链。
+
+`auto` 不默认滥用并发：查询预算少于 2 时强制 single；只有截止时间不超过 10 秒、至少两条症状明确跨越多个观测域，或出现三条以上独立症状时才选择 multi。路由器先写入 `orchestration_selected`，随后两个执行器共享相同 Gateway、Store、Audit 与安全策略。
+
+默认仍为 `single`，因为当前 4 条简单事故中强制 multi 没有提升准确率，平均查询反而从 2.5 增至 3.0。`auto` 在这 4 条中选择 multi 为 0 次，保持 2.5 次平均查询；复杂跨域契约测试则会选择 multi。25 ms/查询模拟只证明并发调度，不能代替真实 Provider 压测。完整边界见 [多 Agent 编排说明](docs/MULTI_AGENT_ORCHESTRATION.md)。
 
 API 调查请求示例：
 
@@ -96,7 +153,7 @@ Invoke-RestMethod http://127.0.0.1:8000/readyz
 docker compose down
 ```
 
-Compose 只把服务绑定到 `127.0.0.1`。如果要对外提供服务，必须在可信反向代理后补 TLS、身份系统、租户级 RBAC、限流和集中审计。
+Compose 只把服务绑定到 `127.0.0.1`。如果要对外提供服务，必须在可信反向代理后补 TLS、身份系统、租户级 RBAC、分布式/租户级配额和集中审计。
 
 ## 连接 Prometheus / Loki / Tempo
 
@@ -121,13 +178,21 @@ $env:SENTINELOPS_OBSERVABILITY_TENANT = "租户标识"
 
 适配器当前假设标签名为 `service`，Tempo 使用 `service.name`；不同组织应通过后续模板配置层适配自己的 schema。Changes 尚无跨平台标准 API，因此真实模式不会伪造该来源，缺失来源会被审计为降级。详细说明见 [可观测性适配器](docs/OBSERVABILITY_ADAPTERS.md)。
 
+## 脱敏故障回放
+
+```powershell
+.\.venv\Scripts\python.exe -m sentinelops replay-check
+```
+
+回放在发起任何模拟请求前先执行 1 MB 文件上限、隐私扫描、严格 Pydantic 契约与结构指纹校验；执行阶段只使用 `httpx.MockTransport`，不会访问网络。当前数据集覆盖三个 Provider 的成功响应、503 可重试错误与 Schema 错误。项目不提供自动生产抓包，新增真实案例必须先做最小化导出、脱敏和人工评审。格式与更新流程见 [回放契约](docs/REPLAY_CONTRACT.md)。
+
 ## 测试与发布门禁
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\release_check.py
 ```
 
-门禁会执行编译检查、全量 pytest、80% 覆盖率门槛和 4 个标注事故的确定性基线。最近一次实测记录见 [测试结果](docs/TEST_RESULTS.md)。
+门禁会执行编译检查、隐私/危险调用扫描、全量 pytest、80% 覆盖率门槛、Provider 回放门禁、4 个标注事故的确定性基线，以及 single/multi/auto 编排消融。最近一次实测记录见 [测试结果](docs/TEST_RESULTS.md)。
 
 ## 隐私内容自动阻断
 
@@ -138,18 +203,19 @@ $env:SENTINELOPS_OBSERVABILITY_TENANT = "租户标识"
 git config --local user.email "lin-or-feng@users.noreply.github.com"
 ```
 
-三层门禁：
+四层门禁：
 
-1. `pre-commit` 扫描暂存区并检查 Git 作者邮箱；
-2. `pre-push` 只扫描即将新增到远端的提交及其作者/提交者邮箱；
-3. GitHub Actions 扫描全部跟踪文件，防止 Hook 未安装或被绕过。
+1. `release_check.py` 扫描已跟踪和未跟踪但未忽略的工作树候选文件；
+2. `pre-commit` 扫描暂存区并检查 Git 作者邮箱；
+3. `pre-push` 只扫描即将新增到远端的提交及其作者/提交者邮箱；
+4. GitHub Actions 扫描仓库内容，防止 Hook 未安装或被绕过。
 
 默认拦截手机号、身份证号、非示例邮箱、本机用户目录、常见云/API Token、私钥、硬编码凭据、`.env`、数据库和密钥文件。二进制无法可靠文本扫描，因此默认拒绝；人工核验后只能把该文件的**精确 SHA-256**加入 `.privacy-allowlist`，文件一旦变化必须重新审核。
 
 手动检查：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\privacy_guard.py --tracked
+.\.venv\Scripts\python.exe scripts\privacy_guard.py --worktree
 ```
 
 规则不会打印命中的实际值。Git Hook 仍可被 `--no-verify` 主动绕过，CI 只能在内容上传后报警，因此不要使用该参数。凭据若曾进入 Git 历史，应先吊销/轮换，再经过确认后重写历史；仅删除当前文件并不能消除泄露。
@@ -171,11 +237,15 @@ git config --local user.email "lin-or-feng@users.noreply.github.com"
 3. **0.2.1 隐私防上传**：暂存区/推送提交/CI 三层扫描、noreply 身份检查、二进制哈希审批（完成）。
 4. **0.3 真实只读适配器**：Prometheus/Loki/Tempo、契约测试、输入脱敏和 HTTP 安全边界（完成）。
 5. **0.3.1 韧性边界**：按来源熔断、半开单探针、连接池生命周期和就绪探针（完成）。
-6. **0.3.2 故障回放**：录制脱敏后的 provider 响应，建立真实事故离线回归与 schema 漂移检测。
-7. **0.4 受控模型策略**：LLM 只生成结构化 `InvestigationAction`，策略失败回退规则策略，并与基线做消融。
-8. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO、备份恢复和人工审批。
+6. **0.3.2 故障回放**：隐私门禁、结构指纹、Provider 成功/故障离线回归与 Schema 漂移检测（完成）。
+7. **0.3.3 自身可观测性**：请求/调查关联、结构化日志、低基数 Prometheus 指标与建议 SLO（完成）。
+8. **0.3.4 API 边界**：请求体上限、滑动窗口 RPM、并发准入、可信 Host、精确 CORS 与安全响应头（完成）。
+9. **0.4 有界多 Agent 基线**：Supervisor、专项调查员、Reviewer、共享预算、波内并发、失败隔离与 single/multi 消融（完成）。
+10. **0.4.1 自适应编排**：成本感知 single/multi 路由、路由原因审计与 auto 消融（完成）。
+11. **0.4.2 受控模型策略**：LLM 只生成结构化 `InvestigationAction` 或数据源优先级，失败回退规则策略，并与确定性基线做消融。
+12. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO 执行、备份恢复和人工审批。
 
-只有当单 Agent 在固定评测集上无法达到召回或时延目标，且多 Agent 消融证明收益高于成本，才引入并行调查者。
+多 Agent 当前作为可选模式保留：只有当真实 Provider 压测证明时延收益高于额外查询成本，才应在部署中改为默认。模型策略同样必须通过固定评测和回退测试后才能进入默认路径。
 
 ## License
 

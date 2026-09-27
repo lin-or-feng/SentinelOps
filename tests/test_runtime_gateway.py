@@ -8,6 +8,7 @@ from sentinelops.audit import AuditLog
 from sentinelops.domain import ActionType, EvidenceSource, InvestigationAction, QuerySpec
 from sentinelops.gateway import EvidenceGateway, EvidenceToolError, GatewayPolicy
 from sentinelops.runtime import BudgetExceeded, InvestigationBudget
+from sentinelops.telemetry import OperationalMetrics
 
 
 def test_budget_rejects_repeated_actions() -> None:
@@ -142,6 +143,7 @@ def test_gateway_circuit_breaker_opens_and_recovers_with_one_probe(tmp_path) -> 
     clock = FakeClock()
     tool = RecoveringTool()
     audit = AuditLog(tmp_path / "circuit.db")
+    metrics = OperationalMetrics(version="test")
     gateway = EvidenceGateway(
         tool,
         audit,
@@ -152,6 +154,7 @@ def test_gateway_circuit_breaker_opens_and_recovers_with_one_probe(tmp_path) -> 
             cooldown_seconds=10,
         ),
         clock=clock,
+        metrics=metrics,
     )
     query = QuerySpec(incident_id="inc-circuit", source=EvidenceSource.LOGS)
 
@@ -187,6 +190,10 @@ def test_gateway_circuit_breaker_opens_and_recovers_with_one_probe(tmp_path) -> 
     assert open_event["details"]["reason"] == "circuit_open"
     probe_event = audit.list_events(trace_id="trace-concurrent-probe")[0]
     assert probe_event["details"]["reason"] == "circuit_probe_in_progress"
+    rendered = metrics.render_prometheus()
+    assert 'sentinelops_provider_queries_total{source="logs",status="error"} 2' in rendered
+    assert 'sentinelops_provider_queries_total{source="logs",status="circuit_open"} 2' in rendered
+    assert 'sentinelops_provider_circuit_open{source="logs"} 0' in rendered
 
 
 def test_gateway_circuit_state_is_isolated_per_source(tmp_path) -> None:
