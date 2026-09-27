@@ -1,4 +1,4 @@
-# SentinelOps 0.2 架构
+# SentinelOps 0.3.1 架构
 
 ## 1. 设计目标与非目标
 
@@ -31,7 +31,7 @@ START
   -> policy.decide(state)
       -> QUERY(source)
           -> budget.consume
-          -> gateway authorize / retry / bound / audit
+          -> gateway authorize / retry / circuit-break / bound / audit
           -> merge evidence by evidence_id
           -> loop
       -> FINISH
@@ -43,6 +43,8 @@ START
 ```
 
 `InvestigationBudget` 同时约束步骤、查询数、时间和重复动作。任何上限触发后都停止调查并升级人工，避免无限循环和工具放大。
+
+`EvidenceGateway` 为 metrics/logs/traces/changes 分别维护熔断状态。连续终态失败达到阈值后进入 open；冷却期结束后通过锁只保留一个 half-open 探针。状态携带 generation，旧请求完成后不能错误关闭新一代熔断器。熔断事件写入审计，但不记录上游错误正文或凭据。
 
 ## 4. 证据与结论约束
 
@@ -59,10 +61,12 @@ START
 |---|---|---|
 | API 调用方 | 可选静态 Bearer、常量时间比较 | OIDC、租户 RBAC、密钥轮换、速率限制 |
 | 工具调用 | read-only 标志、来源白名单、Pydantic 参数、结果上限 | 每个真实提供方的最小权限凭据与 egress 控制 |
-| Agent 运行时 | 步骤/查询/时间/重复动作预算 | 异步任务、租户配额、取消与背压 |
+| Agent 运行时 | 步骤/查询/时间/重复动作预算、按来源熔断 | 异步任务、租户配额、取消与背压 |
 | 持久化 | SQLite 参数化 SQL、事故 ID 幂等 | PostgreSQL 事务、租户行级安全、备份恢复 |
 | 审计 | 脱敏、前向哈希链、可选 HMAC | KMS 托管密钥、不可变外部归档、多副本串行化 |
 | 容器 | non-root、只读 rootfs、drop capabilities | 镜像签名、SBOM、漏洞扫描、网络策略 |
+
+FastAPI lifespan 在退出时关闭自有 HTTP 连接池。`/healthz` 是不访问依赖的存活探针；`/readyz` 仅检查本地 SQLite，不对外部 provider 发请求，避免探针放大故障或消耗监控配额。
 
 ## 6. 为什么现在仍是单 Agent
 

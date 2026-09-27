@@ -58,6 +58,9 @@ class EvidenceProvider(Protocol):
     def query(self, spec: QuerySpec) -> list[Evidence]:
         """Return normalized evidence from one read-only provider."""
 
+    def close(self) -> None:
+        """Release provider-owned resources."""
+
 
 class _JsonEndpointClient:
     def __init__(
@@ -201,6 +204,9 @@ class PrometheusEvidenceProvider:
             )
         return evidence
 
+    def close(self) -> None:
+        self.endpoint.close()
+
 
 class LokiEvidenceProvider:
     source = EvidenceSource.LOGS
@@ -262,6 +268,9 @@ class LokiEvidenceProvider:
                 )
         return evidence
 
+    def close(self) -> None:
+        self.endpoint.close()
+
 
 class TempoEvidenceProvider:
     source = EvidenceSource.TRACES
@@ -307,6 +316,9 @@ class TempoEvidenceProvider:
             )
         return evidence
 
+    def close(self) -> None:
+        self.endpoint.close()
+
 
 class ObservabilityEvidenceTool:
     name = "observability_http"
@@ -329,6 +341,19 @@ class ObservabilityEvidenceTool:
         if provider is None:
             raise PermissionError(f"observability source is not configured: {spec.source.value}")
         return provider.query(spec)
+
+    def close(self) -> None:
+        first_error: Exception | None = None
+        for provider in self._providers.values():
+            closer = getattr(provider, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+        if first_error is not None:
+            raise RuntimeError("failed to close one or more observability providers") from first_error
 
 
 def observability_tool_from_env(

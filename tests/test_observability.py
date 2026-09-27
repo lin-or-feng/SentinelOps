@@ -219,6 +219,32 @@ def test_observability_tool_routes_only_configured_sources() -> None:
         ObservabilityEvidenceTool([provider, provider])
 
 
+def test_observability_tool_closes_each_provider() -> None:
+    class ClosableProvider:
+        def __init__(self, source: EvidenceSource, *, fail: bool = False) -> None:
+            self.source = source
+            self.fail = fail
+            self.closed = False
+
+        def query(self, query_spec):
+            return []
+
+        def close(self) -> None:
+            self.closed = True
+            if self.fail:
+                raise OSError("close failed")
+
+    failing_provider = ClosableProvider(EvidenceSource.LOGS, fail=True)
+    healthy_provider = ClosableProvider(EvidenceSource.METRICS)
+    tool = ObservabilityEvidenceTool([failing_provider, healthy_provider])
+
+    with pytest.raises(RuntimeError, match="failed to close"):
+        tool.close()
+
+    assert failing_provider.closed is True
+    assert healthy_provider.closed is True
+
+
 def test_environment_factory_requires_allowlist_and_builds_selected_providers() -> None:
     with pytest.raises(ValueError, match="ALLOWED_OBSERVABILITY_HOSTS"):
         observability_tool_from_env({"SENTINELOPS_PROMETHEUS_URL": "https://metrics.internal"})

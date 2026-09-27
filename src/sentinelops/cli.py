@@ -102,6 +102,9 @@ def main(argv: list[str] | None = None) -> int:
     if case is None:
         print(json.dumps({"error": "incident_id not found"}, ensure_ascii=False))
         return 2
-    result = service.investigate(case.task)
+    try:
+        result = service.investigate(case.task)
+    finally:
+        service.close()
     print(result.model_dump_json(indent=2))
     return 0 if result.report.status == IncidentStatus.DIAGNOSED else 2

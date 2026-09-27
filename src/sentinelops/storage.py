@@ -49,3 +49,10 @@ class InvestigationStore:
                 (incident_id,),
             ).fetchone()
         return InvestigationResult.model_validate_json(row[0]) if row else None
+
+    def healthcheck(self) -> bool:
+        try:
+            with self._connect() as connection:
+                return connection.execute("SELECT 1").fetchone() == (1,)
+        except sqlite3.Error:
+            return False

@@ -1,4 +1,4 @@
-# SentinelOps 0.3.0 安全与工程审计报告
+# SentinelOps 0.3.1 安全与工程审计报告
 
 - 审计日期：2026-09-27
 - 范围：`src/`、测试、API、CLI、Docker/Compose、CI 与依赖声明
@@ -24,7 +24,7 @@
 | 只读工具 | `EvidenceTool.read_only` + Gateway 拒绝写工具 | 网关测试 |
 | 来源白名单 | GatewayPolicy allowlist | 拒绝路径测试 |
 | 有界循环 | step/query/deadline/repeat budget | 预算测试 |
-| 失败降级 | 瞬时错误有界重试；其他异常统一包装、审计 | 故障注入测试 |
+| 失败降级 | 瞬时错误有界重试；按来源熔断、冷却与单半开探针；其他异常统一包装、审计 | 故障注入与并发探针测试 |
 | 防单点误诊 | 至少两个独立来源支持才 `diagnosed` | 单来源升级人工测试 |
 | 幂等 | 相同事故载荷复用；不同载荷 409 | Service/API 测试 |
 | 最小披露 | 审计 details 递归脱敏 | 脱敏测试 |
@@ -38,6 +38,7 @@
 | Provider SSRF 边界 | 固定 GET 路径、精确 hostname allowlist、禁止重定向 | MockTransport 契约测试 |
 | Provider 资源边界 | 查询窗口、超时、结果数和响应字节上限 | 契约与故障测试 |
 | 可观测数据隐私 | 最小字段提取，日志/trace 文本入库前脱敏 | 适配器测试 |
+| 服务生命周期 | FastAPI 退出关闭自有 HTTP 连接池；就绪探针只查本地持久化 | 生命周期与 200/503 测试 |
 
 ## 4. 本轮发现并修复
 

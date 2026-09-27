@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
@@ -11,7 +12,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from sentinelops import __version__
 from sentinelops.domain import IncidentTask, InvestigationResult
-from sentinelops.service import IncidentConflict, create_service
+from sentinelops.service import IncidentConflict, SentinelOpsService, create_service
 
 
 def create_app(
@@ -20,6 +21,7 @@ def create_app(
     db_path: str | Path | None = None,
     audit_key: str | bytes | None = None,
     api_token: str | None = None,
+    service_instance: SentinelOpsService | None = None,
 ) -> FastAPI:
     resolved_dataset_path = dataset_path or os.getenv(
         "SENTINELOPS_DATASET_PATH", "evals/incidents.json"
@@ -27,7 +29,7 @@ def create_app(
     resolved_db_path = db_path or os.getenv(
         "SENTINELOPS_DB_PATH", ".sentinelops/sentinelops.db"
     )
-    service = create_service(
+    service = service_instance or create_service(
         dataset_path=resolved_dataset_path,
         db_path=resolved_db_path,
         audit_key=audit_key if audit_key is not None else os.getenv("SENTINELOPS_AUDIT_KEY"),
@@ -47,16 +49,33 @@ def create_app(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        try:
+            yield
+        finally:
+            service.close()
+
     app = FastAPI(
         title="SentinelOps API",
         version=__version__,
         description="Read-only, evidence-first incident investigation service.",
+        lifespan=lifespan,
     )
     app.state.service = service
 
     @app.get("/healthz", tags=["system"])
     def health() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
+
+    @app.get("/readyz", tags=["system"])
+    def readiness() -> dict[str, str]:
+        if not service.is_ready():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="service is not ready",
+            )
+        return {"status": "ready"}
 
     @app.post(
         "/v1/investigations",

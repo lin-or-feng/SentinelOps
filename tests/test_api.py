@@ -3,6 +3,8 @@ from pathlib import Path
 
 from sentinelops.adapters import load_fixture_cases
 from sentinelops.api import create_app
+from sentinelops.domain import EvidenceSource
+from sentinelops.service import create_service
 
 
 DATASET = Path("evals/incidents.json")
@@ -78,3 +80,45 @@ def test_api_reads_runtime_paths_from_environment(tmp_path, monkeypatch) -> None
         assert client.get("/healthz").status_code == 200
 
     assert database.exists()
+
+
+def test_readiness_reports_local_dependency_state_without_auth(tmp_path, monkeypatch) -> None:
+    app = create_app(
+        db_path=tmp_path / "ready.db",
+        api_token="protected-api",
+    )
+    with TestClient(app) as client:
+        assert client.get("/readyz").json() == {"status": "ready"}
+        monkeypatch.setattr(app.state.service.store, "healthcheck", lambda: False)
+        unavailable = client.get("/readyz")
+
+    assert unavailable.status_code == 503
+    assert unavailable.json() == {"detail": "service is not ready"}
+
+
+def test_api_lifespan_closes_evidence_tool(tmp_path) -> None:
+    class ClosableTool:
+        read_only = True
+        name = "closable"
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def query(self, spec):
+            return []
+
+        def close(self) -> None:
+            self.closed = True
+
+    tool = ClosableTool()
+    service = create_service(
+        db_path=tmp_path / "lifecycle.db",
+        evidence_tool=tool,
+        allowed_sources=frozenset({EvidenceSource.LOGS}),
+    )
+
+    with TestClient(create_app(service_instance=service)) as client:
+        assert client.get("/readyz").status_code == 200
+        assert tool.closed is False
+
+    assert tool.closed is True

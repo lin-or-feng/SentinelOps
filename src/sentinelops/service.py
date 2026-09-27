@@ -28,6 +28,7 @@ class SentinelOpsService:
     agent: BoundedInvestigationAgent
     store: InvestigationStore
     audit: AuditLog
+    evidence_tool: EvidenceTool
 
     def investigate(self, task: IncidentTask) -> InvestigationResult:
         existing = self.store.get(task.incident_id)
@@ -52,6 +53,15 @@ class SentinelOpsService:
             )
             raise IncidentConflict("incident_id already exists with a different task payload")
         return self.agent.run(task)
+
+    def is_ready(self) -> bool:
+        """Report local dependency readiness without querying external providers."""
+        return self.store.healthcheck()
+
+    def close(self) -> None:
+        closer = getattr(self.evidence_tool, "close", None)
+        if callable(closer):
+            closer()
 
 
 def create_service(
@@ -103,4 +113,5 @@ def create_service(
         agent=BoundedInvestigationAgent(gateway, audit, store),
         store=store,
         audit=audit,
+        evidence_tool=tool,
     )
