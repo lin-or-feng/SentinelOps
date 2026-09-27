@@ -1,0 +1,25 @@
+name: SentinelOps quality gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - run: python -m compileall -q src tests
+      - run: python -m pytest --cov=sentinelops --cov-report=term-missing --cov-fail-under=80
+      - run: python -m sentinelops

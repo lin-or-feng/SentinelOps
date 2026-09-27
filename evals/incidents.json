@@ -1,0 +1,144 @@
+{
+  "schema_version": "0.1",
+  "cases": [
+    {
+      "task": {
+        "incident_id": "inc-deploy-001",
+        "tenant_id": "demo",
+        "service": "order-service",
+        "started_at": "2026-09-27T02:02:00Z",
+        "symptoms": ["HTTP 500 rate increased after a release"]
+      },
+      "expected_root_cause": "deployment_regression",
+      "evidence": [
+        {
+          "evidence_id": "ev-deploy-metric",
+          "incident_id": "inc-deploy-001",
+          "service": "order-service",
+          "source": "metrics",
+          "observed_at": "2026-09-27T02:03:00Z",
+          "summary": "5xx error rate rose from 0.2% to 18% two minutes after the new version release.",
+          "raw_ref": "fixture://metrics/inc-deploy-001",
+          "attributes": {"error_rate": 0.18}
+        },
+        {
+          "evidence_id": "ev-deploy-change",
+          "incident_id": "inc-deploy-001",
+          "service": "order-service",
+          "source": "changes",
+          "observed_at": "2026-09-27T02:00:00Z",
+          "summary": "Deployment release 2026.09.27.1 completed; rollback candidate is available.",
+          "raw_ref": "fixture://changes/inc-deploy-001"
+        },
+        {
+          "evidence_id": "ev-deploy-log",
+          "incident_id": "inc-deploy-001",
+          "service": "order-service",
+          "source": "logs",
+          "observed_at": "2026-09-27T02:02:10Z",
+          "summary": "New version emits repeated checkout mapping errors.",
+          "raw_ref": "fixture://logs/inc-deploy-001"
+        }
+      ]
+    },
+    {
+      "task": {
+        "incident_id": "inc-db-001",
+        "tenant_id": "demo",
+        "service": "order-service",
+        "started_at": "2026-09-27T03:00:00Z",
+        "symptoms": ["Requests wait and then fail"]
+      },
+      "expected_root_cause": "database_pool_exhaustion",
+      "evidence": [
+        {
+          "evidence_id": "ev-db-metric",
+          "incident_id": "inc-db-001",
+          "service": "order-service",
+          "source": "metrics",
+          "observed_at": "2026-09-27T03:01:00Z",
+          "summary": "connection pool active count equals maximum; db_waiting is 84.",
+          "raw_ref": "fixture://metrics/inc-db-001"
+        },
+        {
+          "evidence_id": "ev-db-log",
+          "incident_id": "inc-db-001",
+          "service": "order-service",
+          "source": "logs",
+          "observed_at": "2026-09-27T03:01:05Z",
+          "summary": "pool timeout while acquiring a database connection.",
+          "raw_ref": "fixture://logs/inc-db-001"
+        },
+        {
+          "evidence_id": "ev-db-trace",
+          "incident_id": "inc-db-001",
+          "service": "order-service",
+          "source": "traces",
+          "observed_at": "2026-09-27T03:01:20Z",
+          "summary": "Database span spent 4.8 seconds waiting for connection pool capacity.",
+          "raw_ref": "fixture://traces/inc-db-001"
+        }
+      ]
+    },
+    {
+      "task": {
+        "incident_id": "inc-cache-001",
+        "tenant_id": "demo",
+        "service": "inventory-service",
+        "started_at": "2026-09-27T04:00:00Z",
+        "symptoms": ["Database CPU and inventory latency increased"]
+      },
+      "expected_root_cause": "cache_miss_storm",
+      "evidence": [
+        {
+          "evidence_id": "ev-cache-metric",
+          "incident_id": "inc-cache-001",
+          "service": "inventory-service",
+          "source": "metrics",
+          "observed_at": "2026-09-27T04:01:00Z",
+          "summary": "cache hit_rate dropped from 0.94 to 0.12 while database CPU doubled.",
+          "raw_ref": "fixture://metrics/inc-cache-001"
+        },
+        {
+          "evidence_id": "ev-cache-log",
+          "incident_id": "inc-cache-001",
+          "service": "inventory-service",
+          "source": "logs",
+          "observed_at": "2026-09-27T04:01:10Z",
+          "summary": "cache miss for the new inventory key prefix repeated across requests.",
+          "raw_ref": "fixture://logs/inc-cache-001"
+        }
+      ]
+    },
+    {
+      "task": {
+        "incident_id": "inc-bank-001",
+        "tenant_id": "demo",
+        "service": "payment-service",
+        "started_at": "2026-09-27T05:00:00Z",
+        "symptoms": ["Payment success rate fell and latency reached 5 seconds"]
+      },
+      "expected_root_cause": "downstream_timeout",
+      "evidence": [
+        {
+          "evidence_id": "ev-bank-log",
+          "incident_id": "inc-bank-001",
+          "service": "payment-service",
+          "source": "logs",
+          "observed_at": "2026-09-27T05:01:00Z",
+          "summary": "upstream timeout calling bank-api after 5000ms.",
+          "raw_ref": "fixture://logs/inc-bank-001"
+        },
+        {
+          "evidence_id": "ev-bank-trace",
+          "incident_id": "inc-bank-001",
+          "service": "payment-service",
+          "source": "traces",
+          "observed_at": "2026-09-27T05:01:10Z",
+          "summary": "bank-api downstream timeout dominates the payment trace critical path.",
+          "raw_ref": "fixture://traces/inc-bank-001"
+        }
+      ]
+    }
+  ]
+}

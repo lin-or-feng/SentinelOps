@@ -1,0 +1,82 @@
+"""Strict domain contracts shared by orchestration, tools and evaluation."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import Enum
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class EvidenceSource(str, Enum):
+    METRICS = "metrics"
+    LOGS = "logs"
+    TRACES = "traces"
+    CHANGES = "changes"
+    RUNBOOK = "runbook"
+
+
+class IncidentStatus(str, Enum):
+    DIAGNOSED = "diagnosed"
+    NEEDS_HUMAN = "needs_human"
+
+
+class IncidentTask(StrictModel):
+    incident_id: str = Field(min_length=3, max_length=120)
+    tenant_id: str = Field(min_length=1, max_length=120)
+    service: str = Field(min_length=1, max_length=120)
+    started_at: datetime
+    symptoms: list[str] = Field(min_length=1, max_length=20)
+    deadline_seconds: int = Field(default=30, ge=1, le=300)
+    query_budget: int = Field(default=12, ge=1, le=100)
+
+
+class QuerySpec(StrictModel):
+    incident_id: str = Field(min_length=3, max_length=120)
+    source: EvidenceSource
+    service: str | None = Field(default=None, max_length=120)
+    keywords: list[str] = Field(default_factory=list, max_length=20)
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class Evidence(StrictModel):
+    evidence_id: str = Field(min_length=3, max_length=160)
+    incident_id: str = Field(min_length=3, max_length=120)
+    service: str = Field(min_length=1, max_length=120)
+    source: EvidenceSource
+    observed_at: datetime
+    summary: str = Field(min_length=1, max_length=2_000)
+    raw_ref: str = Field(min_length=1, max_length=500)
+    reliability: float = Field(default=1.0, ge=0.0, le=1.0)
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+
+class RootCauseCandidate(StrictModel):
+    code: str = Field(min_length=2, max_length=120)
+    summary: str = Field(min_length=1, max_length=500)
+    evidence_ids: list[str] = Field(default_factory=list)
+    score: float = Field(ge=0.0, le=1.0)
+
+
+class DiagnosisReport(StrictModel):
+    incident_id: str
+    status: IncidentStatus
+    candidates: list[RootCauseCandidate] = Field(default_factory=list, max_length=10)
+    selected_code: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    unresolved_questions: list[str] = Field(default_factory=list)
+    tool_queries: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def selected_candidate_must_exist(self) -> "DiagnosisReport":
+        candidate_codes = {candidate.code for candidate in self.candidates}
+        if self.selected_code is not None and self.selected_code not in candidate_codes:
+            raise ValueError("selected_code must reference an existing candidate")
+        if self.status == IncidentStatus.DIAGNOSED and self.selected_code is None:
+            raise ValueError("diagnosed reports require selected_code")
+        return self

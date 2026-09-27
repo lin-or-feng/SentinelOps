@@ -1,0 +1,29 @@
+[project]
+name = "sentinelops"
+version = "0.1.0"
+description = "Evidence-first incident diagnosis baseline for a future multi-agent system"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.8,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "pytest-cov>=5,<8",
+]
+
+[project.scripts]
+sentinelops-baseline = "sentinelops.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q -p no:cacheprovider"
