@@ -154,3 +154,21 @@ def scan_content(
             findings.append(PrivacyFinding(normalized, marker[0], line))
             seen.add(marker)
     return findings
+
+
+def redact_private_text(text: str, *, max_length: int = 1_000) -> str:
+    """Redact known private values before evidence is persisted or returned."""
+
+    compact = " ".join(text.split())[:max_length]
+    for rule, pattern in TEXT_PATTERNS:
+        if rule == "email address":
+            compact = pattern.sub(
+                lambda match: match.group(0)
+                if _is_safe_email(match.group(0))
+                else f"[REDACTED:{rule}]",
+                compact,
+            )
+        else:
+            compact = pattern.sub(f"[REDACTED:{rule}]", compact)
+    compact = CREDENTIAL_LITERAL.sub("[REDACTED:credential-like literal]", compact)
+    return compact

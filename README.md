@@ -1,10 +1,10 @@
-# SentinelOps 0.2.1
+# SentinelOps 0.3.0
 
 SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围绕真实生产约束设计：Agent 只能查询指标、日志、链路和变更记录；每次调查受步骤、查询次数和截止时间限制；结论必须引用证据；证据不足时升级人工，而不是编造根因。
 
 当前版本是**可复现的单 Agent 主体闭环**，不是生产事故平台，也没有连接真实监控系统。Fixture 适配器用于离线评测，未来接入 Prometheus、Loki、Tempo 等系统时不改变领域契约。
 
-## 0.2.1 已完成能力
+## 0.3.0 已完成能力
 
 - **调查编排**：`观察 -> 选择只读数据源 -> 查询 -> 更新证据 -> 诊断/升级人工`；
 - **有界执行**：限制最大步骤、查询次数、截止时间和重复动作；
@@ -17,6 +17,7 @@ SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围�
 - **可复现交付**：非 root Docker 镜像、只读容器文件系统、最小 Linux capability；
 - **质量门禁**：离线基线、单元/集成测试、覆盖率下限、敏感信息与危险调用扫描。
 - **隐私防上传**：提交前扫描暂存内容，推送前扫描新增提交，CI 再扫描全部跟踪文件；命中时只显示文件、行号和规则，不回显隐私值。
+- **真实只读适配器**：Prometheus 指标、Loki 日志、Tempo 链路统一归一化为 `Evidence`；HTTPS、主机 allowlist、禁止重定向、超时和响应体上限默认启用。
 
 ## 架构速览
 
@@ -96,6 +97,27 @@ docker compose down
 
 Compose 只把服务绑定到 `127.0.0.1`。如果要对外提供服务，必须在可信反向代理后补 TLS、身份系统、租户级 RBAC、限流和集中审计。
 
+## 连接 Prometheus / Loki / Tempo
+
+默认 `SENTINELOPS_EVIDENCE_MODE=fixture`，不会访问任何外部系统。真实模式必须显式配置精确主机 allowlist 和只读凭据：
+
+```powershell
+$env:SENTINELOPS_EVIDENCE_MODE = "observability"
+$env:SENTINELOPS_ALLOWED_OBSERVABILITY_HOSTS = "prometheus.internal,loki.internal,tempo.internal"
+$env:SENTINELOPS_PROMETHEUS_URL = "https://prometheus.internal"
+$env:SENTINELOPS_LOKI_URL = "https://loki.internal"
+$env:SENTINELOPS_TEMPO_URL = "https://tempo.internal"
+$env:SENTINELOPS_PROMETHEUS_TOKEN = "只读令牌"
+$env:SENTINELOPS_LOKI_TOKEN = "只读令牌"
+$env:SENTINELOPS_TEMPO_TOKEN = "只读令牌"
+$env:SENTINELOPS_OBSERVABILITY_TENANT = "租户标识"
+.\.venv\Scripts\python.exe -m sentinelops serve --host 127.0.0.1 --port 8000
+```
+
+实时查询只接受 Agent 生成的结构化 `QuerySpec`，不接受调用方直接传 PromQL、LogQL 或 TraceQL。服务名会转义后进入固定模板；查询窗口必须完整、带时区、起止有序且不超过一小时。日志和链路文本在进入 SQLite/API 前经过隐私脱敏。
+
+适配器当前假设标签名为 `service`，Tempo 使用 `service.name`；不同组织应通过后续模板配置层适配自己的 schema。Changes 尚无跨平台标准 API，因此真实模式不会伪造该来源，缺失来源会被审计为降级。详细说明见 [可观测性适配器](docs/OBSERVABILITY_ADAPTERS.md)。
+
 ## 测试与发布门禁
 
 ```powershell
@@ -144,9 +166,10 @@ git config --local user.email "lin-or-feng@users.noreply.github.com"
 1. **0.1 确定性基线**：契约、只读工具、事故集、评分器（完成）。
 2. **0.2 单 Agent 主闭环与审计**：有界调查、持久化、API、完整性审计、容器化（完成）。
 3. **0.2.1 隐私防上传**：暂存区/推送提交/CI 三层扫描、noreply 身份检查、二进制哈希审批（完成）。
-4. **0.3 真实只读适配器**：Prometheus/Loki/Tempo，契约测试、故障注入和离线回放。
-5. **0.4 受控模型策略**：LLM 只生成结构化 `InvestigationAction`，策略失败回退确定性规则，并与基线做消融。
-6. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO、备份恢复和人工审批。
+4. **0.3 真实只读适配器**：Prometheus/Loki/Tempo、契约测试、输入脱敏和 HTTP 安全边界（完成）。
+5. **0.3.1 故障回放**：录制脱敏后的 provider 响应，建立真实事故离线回归与 schema 漂移检测。
+6. **0.4 受控模型策略**：LLM 只生成结构化 `InvestigationAction`，策略失败回退规则策略，并与基线做消融。
+7. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO、备份恢复和人工审批。
 
 只有当单 Agent 在固定评测集上无法达到召回或时延目标，且多 Agent 消融证明收益高于成本，才引入并行调查者。
 

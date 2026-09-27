@@ -2,7 +2,7 @@ import hashlib
 
 import pytest
 
-from sentinelops.privacy import scan_content
+from sentinelops.privacy import redact_private_text, scan_content
 
 
 def rules(path: str, data: bytes) -> set[str]:
@@ -64,3 +64,14 @@ def test_blocks_oversized_unscannable_content() -> None:
     findings = scan_content("large.txt", b"a" * 1_000_001)
 
     assert {finding.rule for finding in findings} == {"file exceeds privacy scan size limit"}
+
+
+def test_redacts_private_text_before_persistence() -> None:
+    phone = "138" + "0013" + "8000"
+    email = "private" + "@" + "corp.internal"
+
+    redacted = redact_private_text(f"phone={phone} email={email}")
+
+    assert phone not in redacted
+    assert email not in redacted
+    assert redacted.count("[REDACTED:") == 2

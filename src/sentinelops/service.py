@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from sentinelops.adapters import FixtureEvidenceTool, load_fixture_cases
+from sentinelops.adapters import (
+    FixtureEvidenceTool,
+    load_fixture_cases,
+    observability_tool_from_env,
+)
 from sentinelops.audit import AuditLog
 from sentinelops.domain import EvidenceSource, IncidentTask, InvestigationResult
 from sentinelops.gateway import EvidenceGateway, GatewayPolicy
 from sentinelops.investigation import BoundedInvestigationAgent
+from sentinelops.ports import EvidenceTool
 from sentinelops.storage import InvestigationStore
 
 
@@ -53,23 +59,44 @@ def create_service(
     dataset_path: str | Path = "evals/incidents.json",
     db_path: str | Path = ".sentinelops/sentinelops.db",
     audit_key: str | bytes | None = None,
+    evidence_mode: str | None = None,
+    evidence_tool: EvidenceTool | None = None,
+    allowed_sources: frozenset[EvidenceSource] | None = None,
 ) -> SentinelOpsService:
-    cases = load_fixture_cases(dataset_path)
-    evidence = [item for case in cases for item in case.evidence]
-    audit = AuditLog(db_path, key=audit_key)
-    store = InvestigationStore(db_path)
-    gateway = EvidenceGateway(
-        FixtureEvidenceTool(evidence),
-        audit,
-        GatewayPolicy(
-            allowed_sources=frozenset(
+    mode = (evidence_mode or os.getenv("SENTINELOPS_EVIDENCE_MODE") or "fixture").casefold()
+    if evidence_tool is not None:
+        tool = evidence_tool
+    elif mode == "fixture":
+        cases = load_fixture_cases(dataset_path)
+        evidence = [item for case in cases for item in case.evidence]
+        tool = FixtureEvidenceTool(evidence)
+    elif mode == "observability":
+        tool = observability_tool_from_env()
+    else:
+        raise ValueError("evidence_mode must be 'fixture' or 'observability'")
+
+    if allowed_sources is None:
+        allowed_sources = getattr(
+            tool,
+            "sources",
+            frozenset(
                 {
                     EvidenceSource.METRICS,
                     EvidenceSource.LOGS,
                     EvidenceSource.TRACES,
                     EvidenceSource.CHANGES,
                 }
-            )
+            ),
+        )
+    if not allowed_sources:
+        raise ValueError("at least one evidence source must be allowed")
+    audit = AuditLog(db_path, key=audit_key)
+    store = InvestigationStore(db_path)
+    gateway = EvidenceGateway(
+        tool,
+        audit,
+        GatewayPolicy(
+            allowed_sources=allowed_sources
         ),
     )
     return SentinelOpsService(

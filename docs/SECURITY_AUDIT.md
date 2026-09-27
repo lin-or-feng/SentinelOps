@@ -1,4 +1,4 @@
-# SentinelOps 0.2.1 安全与工程审计报告
+# SentinelOps 0.3.0 安全与工程审计报告
 
 - 审计日期：2026-09-27
 - 范围：`src/`、测试、API、CLI、Docker/Compose、CI 与依赖声明
@@ -35,6 +35,9 @@
 | 防匿名外部监听 | CLI 非 loopback 绑定必须配置 API Token；Compose 强制两项密钥 | CLI/配置测试 |
 | 隐私防上传 | pre-commit + pre-push + CI；敏感值不回显 | 隐私规则与 Hook 阻断测试 |
 | 二进制审批 | 默认拒绝，按精确 SHA-256 allowlist | 单元测试 |
+| Provider SSRF 边界 | 固定 GET 路径、精确 hostname allowlist、禁止重定向 | MockTransport 契约测试 |
+| Provider 资源边界 | 查询窗口、超时、结果数和响应字节上限 | 契约与故障测试 |
+| 可观测数据隐私 | 最小字段提取，日志/trace 文本入库前脱敏 | 适配器测试 |
 
 ## 4. 本轮发现并修复
 

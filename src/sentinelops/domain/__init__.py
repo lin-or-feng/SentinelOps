@@ -10,6 +10,7 @@ from .contracts import (
     InvestigationTraceStep,
     QuerySpec,
     RootCauseCandidate,
+    StrictModel,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "InvestigationTraceStep",
     "QuerySpec",
     "RootCauseCandidate",
+    "StrictModel",
 ]

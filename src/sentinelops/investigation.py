@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import timedelta
 
 from sentinelops.application.baseline import rank_root_causes
 from sentinelops.audit import AuditLog
@@ -82,6 +83,8 @@ class BoundedInvestigationAgent:
                                 service=task.service,
                                 keywords=action.keywords,
                                 limit=25,
+                                start_time=task.started_at - timedelta(minutes=5),
+                                end_time=task.started_at + timedelta(minutes=15),
                             ),
                             trace_id=trace_id,
                         )

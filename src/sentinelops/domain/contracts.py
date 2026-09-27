@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictModel(BaseModel):
@@ -36,7 +35,7 @@ class IncidentTask(StrictModel):
     incident_id: str = Field(min_length=3, max_length=120)
     tenant_id: str = Field(min_length=1, max_length=120)
     service: str = Field(min_length=1, max_length=120)
-    started_at: datetime
+    started_at: AwareDatetime
     symptoms: list[str] = Field(min_length=1, max_length=20)
     deadline_seconds: int = Field(default=30, ge=1, le=300)
     query_budget: int = Field(default=12, ge=1, le=100)
@@ -48,6 +47,19 @@ class QuerySpec(StrictModel):
     service: str | None = Field(default=None, max_length=120)
     keywords: list[str] = Field(default_factory=list, max_length=20)
     limit: int = Field(default=20, ge=1, le=100)
+    start_time: AwareDatetime | None = None
+    end_time: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def time_window_must_be_complete_and_ordered(self) -> "QuerySpec":
+        if (self.start_time is None) != (self.end_time is None):
+            raise ValueError("start_time and end_time must be provided together")
+        if self.start_time is not None and self.end_time is not None:
+            if self.start_time >= self.end_time:
+                raise ValueError("start_time must be earlier than end_time")
+            if (self.end_time - self.start_time).total_seconds() > 3600:
+                raise ValueError("evidence query window cannot exceed one hour")
+        return self
 
 
 class Evidence(StrictModel):
@@ -55,7 +67,7 @@ class Evidence(StrictModel):
     incident_id: str = Field(min_length=3, max_length=120)
     service: str = Field(min_length=1, max_length=120)
     source: EvidenceSource
-    observed_at: datetime
+    observed_at: AwareDatetime
     summary: str = Field(min_length=1, max_length=2_000)
     raw_ref: str = Field(min_length=1, max_length=500)
     reliability: float = Field(default=1.0, ge=0.0, le=1.0)

@@ -17,7 +17,7 @@ Domain: strict Pydantic contracts
             |
 Ports: EvidenceTool
             |
-Adapters: fixture now, observability providers later
+Adapters: fixture / Prometheus / Loki / Tempo
 
 Cross-cutting: SQLite Store / AuditLog / Runtime Budget
 ```
@@ -72,7 +72,7 @@ START
 
 ## 7. 演进路线
 
-- Fixture -> Prometheus/Loki/Tempo 只读适配器，保持 `EvidenceTool` 契约；
+- Prometheus/Loki/Tempo 已通过统一 `EvidenceTool` 接入；下一步增加脱敏回放集与 schema 漂移检测；
 - SQLite -> PostgreSQL，使用租户键、唯一约束与事务 outbox；
 - 同步请求 -> 持久化任务队列，支持取消、重试、死信和背压；
 - 静态 Bearer -> OIDC/OAuth2 + RBAC；

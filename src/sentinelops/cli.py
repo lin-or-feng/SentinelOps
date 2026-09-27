@@ -9,6 +9,7 @@ from pathlib import Path
 
 from sentinelops.adapters import load_fixture_cases
 from sentinelops.application import evaluate_cases
+from sentinelops.audit import AuditLog
 from sentinelops.domain import IncidentStatus
 from sentinelops.service import create_service
 
@@ -85,15 +86,16 @@ def main(argv: list[str] | None = None) -> int:
         uvicorn.run(app, host=args.host, port=args.port, workers=1)
         return 0
 
+    if args.command == "audit-verify":
+        verification = AuditLog(args.db, key=_audit_key()).verify()
+        print(json.dumps(verification.as_dict(), ensure_ascii=False, indent=2))
+        return 0 if verification.valid else 1
+
     service = create_service(
         dataset_path=args.dataset,
         db_path=args.db,
         audit_key=_audit_key(),
     )
-    if args.command == "audit-verify":
-        verification = service.audit.verify()
-        print(json.dumps(verification.as_dict(), ensure_ascii=False, indent=2))
-        return 0 if verification.valid else 1
 
     cases = load_fixture_cases(args.dataset)
     case = next((item for item in cases if item.task.incident_id == args.incident_id), None)
