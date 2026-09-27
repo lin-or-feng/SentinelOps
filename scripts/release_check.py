@@ -24,6 +24,7 @@ def run(*args: str) -> None:
 
 def main() -> int:
     run("-m", "compileall", "-q", "src", "tests", "scripts")
+    run(str(ROOT / "scripts" / "privacy_guard.py"), "--tracked")
     run(str(ROOT / "scripts" / "static_audit.py"))
     run(
         "-m",

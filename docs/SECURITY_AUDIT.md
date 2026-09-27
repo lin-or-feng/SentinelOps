@@ -1,4 +1,4 @@
-# SentinelOps 0.2 安全与工程审计报告
+# SentinelOps 0.2.1 安全与工程审计报告
 
 - 审计日期：2026-09-27
 - 范围：`src/`、测试、API、CLI、Docker/Compose、CI 与依赖声明
@@ -33,6 +33,8 @@
 | 容器降权 | non-root、只读 rootfs、cap_drop ALL | Compose/Docker 配置检查 |
 | 网络暴露 | 默认服务与 Compose 仅绑定 127.0.0.1 | 配置检查 |
 | 防匿名外部监听 | CLI 非 loopback 绑定必须配置 API Token；Compose 强制两项密钥 | CLI/配置测试 |
+| 隐私防上传 | pre-commit + pre-push + CI；敏感值不回显 | 隐私规则与 Hook 阻断测试 |
+| 二进制审批 | 默认拒绝，按精确 SHA-256 allowlist | 单元测试 |
 
 ## 4. 本轮发现并修复
 
@@ -40,6 +42,7 @@
 2. **中：非瞬时工具异常缺统一审计。** Gateway 现在包装为 `EvidenceToolError`，写入失败类型并由 Agent 降级处理。
 3. **中：重复事故会再次执行。** Service 增加事故级幂等复用；相同 ID 不同载荷拒绝并审计冲突。
 4. **低：审计 API 暴露 JSON 字符串。** API 现在返回解析后的 `details`，避免调用方二次解析。
+5. **中：敏感信息扫描只能在发布门禁发现。** 0.2.1 将扫描前移到暂存区和 pre-push，并验证新增提交使用 GitHub noreply 邮箱。
 
 ## 5. 剩余风险与上线前门槛
 

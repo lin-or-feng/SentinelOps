@@ -1,0 +1,3 @@
+# Binary files are blocked by default because text scanning cannot inspect them.
+# After manual privacy review, add the exact lowercase SHA-256 of an approved binary here.
+# Any changed binary has a new hash and must be reviewed again.

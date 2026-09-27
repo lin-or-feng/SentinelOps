@@ -1,10 +1,10 @@
-# SentinelOps 0.2
+# SentinelOps 0.2.1
 
 SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围绕真实生产约束设计：Agent 只能查询指标、日志、链路和变更记录；每次调查受步骤、查询次数和截止时间限制；结论必须引用证据；证据不足时升级人工，而不是编造根因。
 
 当前版本是**可复现的单 Agent 主体闭环**，不是生产事故平台，也没有连接真实监控系统。Fixture 适配器用于离线评测，未来接入 Prometheus、Loki、Tempo 等系统时不改变领域契约。
 
-## 0.2 已完成能力
+## 0.2.1 已完成能力
 
 - **调查编排**：`观察 -> 选择只读数据源 -> 查询 -> 更新证据 -> 诊断/升级人工`；
 - **有界执行**：限制最大步骤、查询次数、截止时间和重复动作；
@@ -16,6 +16,7 @@ SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围�
 - **服务接口**：FastAPI、Bearer Token 可选认证、OpenAPI、健康检查；
 - **可复现交付**：非 root Docker 镜像、只读容器文件系统、最小 Linux capability；
 - **质量门禁**：离线基线、单元/集成测试、覆盖率下限、敏感信息与危险调用扫描。
+- **隐私防上传**：提交前扫描暂存内容，推送前扫描新增提交，CI 再扫描全部跟踪文件；命中时只显示文件、行号和规则，不回显隐私值。
 
 ## 架构速览
 
@@ -103,6 +104,31 @@ Compose 只把服务绑定到 `127.0.0.1`。如果要对外提供服务，必须
 
 门禁会执行编译检查、全量 pytest、80% 覆盖率门槛和 4 个标注事故的确定性基线。最近一次实测记录见 [测试结果](docs/TEST_RESULTS.md)。
 
+## 隐私内容自动阻断
+
+首次克隆后使用项目虚拟环境安装版本化 Git Hook，并使用 GitHub noreply 邮箱保存后续提交。安装脚本同时把 Hook 解释器固定到当前虚拟环境，避免误用系统 Python：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\install_git_hooks.py
+git config --local user.email "lin-or-feng@users.noreply.github.com"
+```
+
+三层门禁：
+
+1. `pre-commit` 扫描暂存区并检查 Git 作者邮箱；
+2. `pre-push` 只扫描即将新增到远端的提交及其作者/提交者邮箱；
+3. GitHub Actions 扫描全部跟踪文件，防止 Hook 未安装或被绕过。
+
+默认拦截手机号、身份证号、非示例邮箱、本机用户目录、常见云/API Token、私钥、硬编码凭据、`.env`、数据库和密钥文件。二进制无法可靠文本扫描，因此默认拒绝；人工核验后只能把该文件的**精确 SHA-256**加入 `.privacy-allowlist`，文件一旦变化必须重新审核。
+
+手动检查：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\privacy_guard.py --tracked
+```
+
+规则不会打印命中的实际值。Git Hook 仍可被 `--no-verify` 主动绕过，CI 只能在内容上传后报警，因此不要使用该参数。凭据若曾进入 Git 历史，应先吊销/轮换，再经过确认后重写历史；仅删除当前文件并不能消除泄露。
+
 ## 审计保证与限制
 
 - 配置 `SENTINELOPS_AUDIT_KEY` 时使用 HMAC-SHA256，可发现不知道密钥的数据库篡改；
@@ -117,9 +143,10 @@ Compose 只把服务绑定到 `127.0.0.1`。如果要对外提供服务，必须
 
 1. **0.1 确定性基线**：契约、只读工具、事故集、评分器（完成）。
 2. **0.2 单 Agent 主闭环与审计**：有界调查、持久化、API、完整性审计、容器化（完成）。
-3. **0.3 真实只读适配器**：Prometheus/Loki/Tempo，契约测试、故障注入和离线回放。
-4. **0.4 受控模型策略**：LLM 只生成结构化 `InvestigationAction`，策略失败回退确定性规则，并与基线做消融。
-5. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO、备份恢复和人工审批。
+3. **0.2.1 隐私防上传**：暂存区/推送提交/CI 三层扫描、noreply 身份检查、二进制哈希审批（完成）。
+4. **0.3 真实只读适配器**：Prometheus/Loki/Tempo，契约测试、故障注入和离线回放。
+5. **0.4 受控模型策略**：LLM 只生成结构化 `InvestigationAction`，策略失败回退确定性规则，并与基线做消融。
+6. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO、备份恢复和人工审批。
 
 只有当单 Agent 在固定评测集上无法达到召回或时延目标，且多 Agent 消融证明收益高于成本，才引入并行调查者。
 
