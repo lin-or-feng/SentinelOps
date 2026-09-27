@@ -2,7 +2,7 @@
 
 SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围绕真实生产约束设计：Agent 只能查询指标、日志、链路和变更记录；每次调查受步骤、查询次数和截止时间限制；结论必须引用证据；证据不足时升级人工，而不是编造根因。
 
-当前版本是**可复现的单 Agent 主体闭环**，不是生产事故平台，也没有连接真实监控系统。Fixture 适配器用于离线评测，未来接入 Prometheus、Loki、Tempo 等系统时不改变领域契约。
+当前版本是**可复现的单 Agent 主体闭环**，不是生产事故平台。默认使用 Fixture 做离线评测，不访问外部系统；显式启用 observability 模式后，可通过同一领域契约连接 Prometheus、Loki、Tempo 的只读 API。
 
 ## 0.3.1 已完成能力
 
@@ -32,7 +32,7 @@ InvestigationPolicy   EvidenceGateway ── 只读 / 白名单 / 重试 / 熔�
                            |
                     EvidenceTool port
                            |
-                    Fixture adapter（当前）
+       Fixture / Prometheus / Loki / Tempo adapters
 
 SQLite: InvestigationStore + append-only AuditLog
 ```
