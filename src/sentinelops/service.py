@@ -27,6 +27,13 @@ from sentinelops.multi_agent import (
     BoundedMultiAgentSupervisor,
     MultiAgentConfig,
 )
+from sentinelops.model_policy import (
+    ControlledModelPolicy,
+    OllamaSourceProposer,
+    SourceProposer,
+    ollama_policy_config_from_env,
+)
+from sentinelops.policy import HeuristicInvestigationPolicy, InvestigationPolicy
 from sentinelops.ports import EvidenceTool
 from sentinelops.storage import InvestigationStore
 from sentinelops.telemetry import OperationalMetrics, current_request_id
@@ -43,6 +50,7 @@ class SentinelOpsService:
     audit: AuditLog
     evidence_tool: EvidenceTool
     metrics: OperationalMetrics
+    policy_resource: object | None = None
 
     def investigate(self, task: IncidentTask) -> InvestigationResult:
         started = time.perf_counter()
@@ -104,8 +112,13 @@ class SentinelOpsService:
 
     def close(self) -> None:
         closer = getattr(self.evidence_tool, "close", None)
-        if callable(closer):
-            closer()
+        try:
+            if callable(closer):
+                closer()
+        finally:
+            policy_closer = getattr(self.policy_resource, "close", None)
+            if callable(policy_closer):
+                policy_closer()
 
 
 def create_service(
@@ -118,6 +131,8 @@ def create_service(
     allowed_sources: frozenset[EvidenceSource] | None = None,
     orchestration_mode: str | OrchestrationMode | None = None,
     multi_agent_config: MultiAgentConfig | None = None,
+    policy_mode: str | None = None,
+    model_proposer: SourceProposer | None = None,
 ) -> SentinelOpsService:
     requested_mode = orchestration_mode or os.getenv("SENTINELOPS_ORCHESTRATION_MODE") or "single"
     try:
@@ -128,6 +143,17 @@ def create_service(
         )
     except ValueError as exc:
         raise ValueError("orchestration_mode must be 'single', 'multi', or 'auto'") from exc
+
+    resolved_policy_mode = (
+        policy_mode or os.getenv("SENTINELOPS_POLICY_MODE") or "heuristic"
+    ).casefold()
+    if resolved_policy_mode not in {"heuristic", "ollama"}:
+        raise ValueError("policy_mode must be 'heuristic' or 'ollama'")
+    if resolved_policy_mode == "heuristic" and model_proposer is not None:
+        raise ValueError("model_proposer requires policy_mode='ollama'")
+    ollama_config = None
+    if resolved_policy_mode == "ollama" and model_proposer is None:
+        ollama_config = ollama_policy_config_from_env()
 
     mode = (evidence_mode or os.getenv("SENTINELOPS_EVIDENCE_MODE") or "fixture").casefold()
     if evidence_tool is not None:
@@ -167,7 +193,21 @@ def create_service(
         ),
         metrics=metrics,
     )
-    single_agent = BoundedInvestigationAgent(gateway, audit, store)
+    policy_resource: object | None = None
+    policy: InvestigationPolicy
+    if resolved_policy_mode == "ollama":
+        if model_proposer is None:
+            assert ollama_config is not None
+            model_proposer = OllamaSourceProposer(ollama_config)
+            policy_resource = model_proposer
+        policy = ControlledModelPolicy(
+            model_proposer,
+            audit,
+            allowed_sources=allowed_sources,
+        )
+    else:
+        policy = HeuristicInvestigationPolicy()
+    single_agent = BoundedInvestigationAgent(gateway, audit, store, policy=policy)
     agent: BoundedInvestigationAgent | BoundedMultiAgentSupervisor | AdaptiveInvestigationAgent
     if resolved_mode in {OrchestrationMode.MULTI, OrchestrationMode.AUTO}:
         multi_agent = BoundedMultiAgentSupervisor(
@@ -176,6 +216,7 @@ def create_service(
             store,
             allowed_sources=allowed_sources,
             config=multi_agent_config,
+            policy=policy,
         )
         if resolved_mode == OrchestrationMode.AUTO:
             agent = AdaptiveInvestigationAgent(single_agent, multi_agent, audit)
@@ -189,4 +230,5 @@ def create_service(
         audit=audit,
         evidence_tool=tool,
         metrics=metrics,
+        policy_resource=policy_resource,
     )

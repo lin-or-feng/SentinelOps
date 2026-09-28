@@ -85,7 +85,7 @@ class BoundedInvestigationAgent:
         unresolved: list[str] = []
         try:
             while True:
-                action = self.policy.decide(state)
+                action = self.policy.decide(state, trace_id=trace_id)
                 budget.consume(action)
                 step_started = time.perf_counter()
                 if action.action == ActionType.QUERY:

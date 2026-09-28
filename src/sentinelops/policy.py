@@ -23,8 +23,19 @@ class InvestigationState:
 
 
 class InvestigationPolicy(Protocol):
-    def decide(self, state: InvestigationState) -> InvestigationAction:
+    def decide(
+        self,
+        state: InvestigationState,
+        *,
+        trace_id: str | None = None,
+    ) -> InvestigationAction:
         """Choose the next bounded action from the current observations."""
+
+    def source_order(self, task: IncidentTask) -> tuple[EvidenceSource, ...]:
+        """Return the deterministic evidence-source fallback order."""
+
+    def keywords(self, task: IncidentTask, source: EvidenceSource) -> list[str]:
+        """Build bounded query keywords without model-generated query languages."""
 
 
 class HeuristicInvestigationPolicy:
@@ -34,7 +45,13 @@ class HeuristicInvestigationPolicy:
         self.min_confidence = min(max(min_confidence, 0.0), 1.0)
         self.min_supporting_sources = max(1, min_supporting_sources)
 
-    def decide(self, state: InvestigationState) -> InvestigationAction:
+    def decide(
+        self,
+        state: InvestigationState,
+        *,
+        trace_id: str | None = None,
+    ) -> InvestigationAction:
+        del trace_id
         candidates = rank_root_causes(state.evidence)
         if candidates:
             top = candidates[0]

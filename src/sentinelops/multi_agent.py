@@ -28,7 +28,7 @@ from sentinelops.domain import (
     QuerySpec,
 )
 from sentinelops.gateway import EvidenceGateway, EvidenceToolError
-from sentinelops.policy import HeuristicInvestigationPolicy
+from sentinelops.policy import HeuristicInvestigationPolicy, InvestigationPolicy
 from sentinelops.storage import InvestigationStore
 
 
@@ -154,7 +154,7 @@ class BoundedMultiAgentSupervisor:
         *,
         allowed_sources: frozenset[EvidenceSource],
         config: MultiAgentConfig | None = None,
-        policy: HeuristicInvestigationPolicy | None = None,
+        policy: InvestigationPolicy | None = None,
         reviewer: EvidenceReviewer | None = None,
     ) -> None:
         self.gateway = gateway
@@ -280,7 +280,7 @@ class BoundedMultiAgentSupervisor:
         started = time.perf_counter()
         deadline_seconds = min(self.config.deadline_seconds, float(task.deadline_seconds))
         query_limit = min(self.config.max_queries, task.query_budget)
-        source_plan = [
+        base_sources = [
             source
             for source in self.policy.source_order(task)
             if source in self.allowed_sources
@@ -289,7 +289,7 @@ class BoundedMultiAgentSupervisor:
             "service": task.service,
             "orchestration_mode": self.orchestration_mode.value,
             "query_budget": query_limit,
-            "planned_workers": len(source_plan),
+            "planned_workers": len(base_sources),
         }
         if request_id is not None:
             start_details["request_id"] = request_id
@@ -301,6 +301,16 @@ class BoundedMultiAgentSupervisor:
             status="ok",
             details=start_details,
         )
+
+        planner = getattr(self.policy, "plan_sources", None)
+        ordered_sources = (
+            planner(task, allowed_sources=self.allowed_sources, trace_id=trace_id)
+            if callable(planner)
+            else base_sources
+        )
+        source_plan = [
+            source for source in ordered_sources if source in self.allowed_sources
+        ][:query_limit]
 
         findings: list[InvestigatorFinding] = []
         reviewed_evidence: list[Evidence] = []

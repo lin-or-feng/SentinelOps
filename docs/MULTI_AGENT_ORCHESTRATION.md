@@ -84,11 +84,11 @@ API 返回的 `InvestigationResult` 包含 `orchestration_mode`；每个 TraceSt
 
 | 模式 | Top-1 | 证据有效率 | 平均查询 | 平均耗时（25 ms/查询模拟） |
 |---|---:|---:|---:|---:|
-| Single | 100% | 100% | 2.5 | 72.77 ms |
-| Multi | 100% | 100% | 3.0 | 60.34 ms |
-| Auto | 100% | 100% | 2.5 | 78.34 ms |
+| Single | 100% | 100% | 2.5 | 73.22 ms |
+| Multi | 100% | 100% | 3.0 | 57.90 ms |
+| Auto | 100% | 100% | 2.5 | 76.72 ms |
 
-强制多 Agent 在该小数据集上**没有提升准确率**，平均多用 0.5 次查询；有网络等待时通过波内并发在本轮减少 12.43 ms。Auto 判断 4 条都是简单事故，选择 multi 为 0 次，保持了 single 的查询成本，但增加约 5.57 ms 路由与本机调度抖动。Fixture 数值只证明调度路径，不能代替真实 Provider 压测。
+强制多 Agent 在该小数据集上**没有提升准确率**，平均多用 0.5 次查询；有网络等待时通过波内并发在本轮减少 15.32 ms。Auto 判断 4 条都是简单事故，选择 multi 为 0 次，保持了 single 的查询成本，但增加约 3.50 ms 路由与本机调度抖动。Fixture 数值只证明调度路径，不能代替真实 Provider 压测。
 
 ## 6. 0.4.1 成本感知自动路由
 
@@ -96,6 +96,8 @@ API 返回的 `InvestigationResult` 包含 `orchestration_mode`；每个 TraceSt
 
 路由决定以 `orchestration-router / orchestration_selected` 写入同一个 Trace，包含请求模式、实际选择和固定原因码。测试同时验证简单事故选择 single、复杂 Metrics + Logs 事故选择 multi，以及预算不足覆盖复杂度信号。
 
-## 7. 为什么还没有给每个 Agent 接 LLM
+## 7. 0.4.2 模型如何参与，但不接管 Agent
 
-先固定任务契约、工具权限、预算、审计和消融基线，才能判断模型带来的增益。下一阶段只允许模型产生严格的 `InvestigationAction` 或数据源优先级，解析失败、越权来源、超预算和低置信结果全部回退确定性策略。没有固定评测收益前，不增加自由对话、Agent 自建工具或自动修复权限。
+可选 `ControlledModelPolicy` 只调整第一优先数据源；其余计划保持启发式顺序。模型不会分别注入每个 Worker，也不会产生角色间自由对话。Supervisor 仍负责波次、共享预算和截止时间，Worker 仍绑定单一 EvidenceSource，Reviewer 仍独立执行双来源门控。
+
+模型输出解析失败、来源越权或命中隐私规则时，整次建议被丢弃并使用原计划。没有独立评测收益前，不增加 Agent 自建工具、自动修复权限或模型决定终止条件。控制面细节见 [受控模型策略](CONTROLLED_MODEL_POLICY.md)。

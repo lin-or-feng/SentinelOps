@@ -1,6 +1,6 @@
 [project]
 name = "sentinelops"
-version = "0.4.1"
+version = "0.4.2"
 description = "Evidence-first bounded incident investigation Agent with verifiable audit trail"
 requires-python = ">=3.11"
 dependencies = [
