@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 
 from sentinelops.adapters import load_fixture_cases
@@ -10,9 +11,18 @@ from sentinelops.application.policy_eval import (
     evaluate_policy_suite,
     expand_policy_eval_cases,
     load_policy_eval_suite,
+    policy_eval_suite_fingerprint,
+    write_policy_eval_report,
 )
 from sentinelops.domain import EvidenceSource
-from sentinelops.model_policy import ModelPolicyContext, ModelSourceProposal
+from sentinelops.model_policy import (
+    ModelPolicyContext,
+    ModelSourceProposal,
+    OllamaPolicyConfig,
+    OllamaSourceProposer,
+    SOURCE_SELECTION_PROMPT_ID,
+    source_selection_prompt_sha256,
+)
 
 
 DATASET = "evals/policy_cases.json"
@@ -41,6 +51,7 @@ def test_policy_eval_dataset_expands_to_sixty_unique_cases() -> None:
     assert len(cases) == 60
     assert len({case.case_id for case in cases}) == 60
     assert sum(case.must_fallback for case in cases) == 12
+    assert len(policy_eval_suite_fingerprint(suite)) == 64
 
 
 def test_control_plane_replay_passes_safety_and_non_regression_gates() -> None:
@@ -66,6 +77,14 @@ def test_control_plane_replay_passes_safety_and_non_regression_gates() -> None:
     assert summary["gates"]["replay_fallback_complete"] is True
     assert summary["gates"]["passed"] is True
     assert summary["failures"] == []
+    assert summary["provenance"]["candidate"]["kind"] == "control-plane-replay"
+    assert summary["provenance"]["candidate"]["prompt_id"] is None
+    assert len(summary["provenance"]["dataset_sha256"]) == 64
+    assert len(summary["provenance"]["configuration_sha256"]) == 64
+    assert len(summary["groups"]) == 15
+    assert summary["groups"][0]["group_id"] == "deployment-regression"
+    assert summary["groups"][0]["assisted_top1"] == 1.0
+    assert summary["confusion_matrix"]["changes"]["changes"] == 12
 
 
 def test_live_candidate_regression_fails_gate() -> None:
@@ -83,6 +102,55 @@ def test_live_candidate_regression_fails_gate() -> None:
     assert summary["assisted"]["top1_accuracy"] == 0.0
     assert summary["gates"]["source_non_regression"] is False
     assert summary["gates"]["passed"] is False
+
+
+def test_live_ollama_provenance_records_model_and_prompt_identity() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "name": "qwen2.5:7b",
+                            "model": "qwen2.5:7b",
+                            "digest": "a" * 64,
+                        }
+                    ]
+                },
+            )
+        proposal = {"source": "changes", "rationale": "inspect deployment changes"}
+        return httpx.Response(
+            200,
+            json={
+                "message": {"content": json.dumps(proposal)},
+                "prompt_eval_count": 100,
+                "eval_count": 12,
+            },
+        )
+
+    proposer = OllamaSourceProposer(
+        OllamaPolicyConfig(model="qwen2.5:7b"),
+        transport=httpx.MockTransport(handler),
+        collect_usage=True,
+    )
+    try:
+        summary = evaluate_policy_suite(
+            load_policy_eval_suite(DATASET),
+            mode="ollama",
+            proposer=proposer,
+            max_cases=1,
+        )
+    finally:
+        proposer.close()
+
+    candidate = summary["provenance"]["candidate"]
+    assert candidate["kind"] == "ollama"
+    assert candidate["model"] == "qwen2.5:7b"
+    assert candidate["model_digest"] == "a" * 64
+    assert candidate["prompt_id"] == SOURCE_SELECTION_PROMPT_ID
+    assert candidate["prompt_sha256"] == source_selection_prompt_sha256()
+    assert summary["provenance"]["model_identity_limitation"] is None
 
 
 def test_live_safe_selection_need_not_force_replay_fallback() -> None:
@@ -190,3 +258,36 @@ def test_policy_eval_schema_rejects_duplicate_sources(tmp_path) -> None:
 
     with pytest.raises(PolicyEvalDatasetError):
         load_policy_eval_suite(path)
+
+
+def test_policy_eval_report_is_atomic_json_and_privacy_gated(tmp_path) -> None:
+    report = tmp_path / "report.json"
+    summary = {"evaluation_type": "control_plane_replay", "gates": {"passed": True}}
+
+    write_policy_eval_report(report, summary)
+
+    assert json.loads(report.read_text(encoding="utf-8")) == summary
+    private_value = "136" + "1234" + "5678"
+    with pytest.raises(PolicyEvalDatasetError, match="privacy scan"):
+        write_policy_eval_report(report, {"unsafe": private_value})
+    assert json.loads(report.read_text(encoding="utf-8")) == summary
+
+
+def test_policy_eval_report_rejects_non_json_suffix(tmp_path) -> None:
+    with pytest.raises(PolicyEvalDatasetError, match=".json suffix"):
+        write_policy_eval_report(tmp_path / "report.txt", {"valid": True})
+
+
+def test_policy_eval_report_rejects_symlink_target(tmp_path, monkeypatch) -> None:
+    report = tmp_path / "report.json"
+    monkeypatch.setattr(type(report), "is_symlink", lambda self: self == report)
+
+    with pytest.raises(PolicyEvalDatasetError, match="symlink"):
+        write_policy_eval_report(report, {"valid": True})
+
+
+def test_policy_eval_report_rejects_missing_parent(tmp_path) -> None:
+    report = tmp_path / "missing" / "report.json"
+
+    with pytest.raises(PolicyEvalDatasetError, match="parent directory"):
+        write_policy_eval_report(report, {"valid": True})

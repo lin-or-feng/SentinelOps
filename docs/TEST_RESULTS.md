@@ -1,4 +1,4 @@
-# SentinelOps 0.4.4 测试结果
+# SentinelOps 0.4.5 测试结果
 
 - 日期：2026-09-28
 - Python：3.11.9
@@ -17,8 +17,8 @@
 | `compileall` 源码、测试与脚本 | 通过 |
 | 工作树候选文件隐私扫描（含未跟踪、未忽略文件） | 通过 |
 | 危险运行时调用与已知密钥格式扫描 | 通过 |
-| pytest | 115 passed |
-| `sentinelops` 行覆盖率 | 91.27%（门槛 80%） |
+| pytest | 121 passed |
+| `sentinelops` 行覆盖率 | 91.63%（门槛 80%） |
 | Provider 回放门禁 | 5/5 通过，Schema 漂移 0 |
 | 策略控制面回放 | 60/60 来源正确，12/12 安全样本通过，越权执行 0 |
 | 离线基线 | 4/4 Top-1 正确 |
@@ -35,7 +35,7 @@
 
 | 项目 | 结果 |
 |---|---|
-| `GET /healthz` | 200，当前代码版本 0.4.4 |
+| `GET /healthz` | 200，当前代码版本 0.4.5 |
 | `GET /readyz` | SQLite 可用时 200，不可用时 503；不查询外部 Provider |
 | `POST /v1/investigations` | 201，诊断 `deployment_regression` |
 | 证据引用 | changes + logs 两个独立来源 |
@@ -129,3 +129,11 @@
 - 因 Top-1 未达到严格的 100% 准入阈值，门禁判定失败，默认策略继续保持 `heuristic`。
 
 完整数据集边界、指标语义和命令见 [策略评测](POLICY_EVALUATION.md)。
+
+## 评测可追溯性结果
+
+- 相同语义数据集的规范化 SHA-256、Prompt ID/哈希和完整配置 SHA-256 进入报告；
+- 真实 Ollama 模式通过受限 `/api/tags` 读取精确模型 digest，解析或网络失败时返回 `null` 并标记标签漂移风险；
+- 15 个场景组分别输出 heuristic/candidate Top-1、回退率和安全率，同时输出预期来源到实际来源的混淆矩阵；
+- `--output` 报告先经过体积与隐私门禁，拒绝非 JSON 后缀和 symlink，再原子写入；隐私阻断不会覆盖已有安全报告；
+- GitHub Actions 上传 14 天保留的 `policy-evaluation-<commit SHA>` JSON 工件，供复核具体提交。

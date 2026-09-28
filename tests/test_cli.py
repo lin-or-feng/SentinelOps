@@ -18,7 +18,8 @@ def test_serve_refuses_public_bind_without_token(monkeypatch, capsys) -> None:
     assert "refusing non-loopback bind" in capsys.readouterr().err
 
 
-def test_policy_eval_cli_runs_replay_gate(capsys) -> None:
+def test_policy_eval_cli_runs_replay_gate(capsys, tmp_path) -> None:
+    report = tmp_path / "policy-evaluation.json"
     exit_code = main(
         [
             "policy-eval",
@@ -30,8 +31,11 @@ def test_policy_eval_cli_runs_replay_gate(capsys) -> None:
             "1",
             "--max-forbidden-rate",
             "0",
+            "--output",
+            str(report),
         ]
     )
 
     assert exit_code == 0
     assert '"evaluation_type": "control_plane_replay"' in capsys.readouterr().out
+    assert '"configuration_sha256"' in report.read_text(encoding="utf-8")

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
+import platform
 import tempfile
 import time
 from dataclasses import dataclass
@@ -14,6 +17,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
+from sentinelops import __version__
 from sentinelops.adapters import FixtureCase, FixtureEvidenceTool
 from sentinelops.audit import AuditLog
 from sentinelops.domain import EvidenceSource, IncidentTask, StrictModel
@@ -23,6 +27,8 @@ from sentinelops.model_policy import (
     ModelPolicyError,
     ModelSourceProposal,
     OllamaSourceProposer,
+    SOURCE_SELECTION_PROMPT_ID,
+    source_selection_prompt_sha256,
     SourceProposer,
 )
 from sentinelops.policy import HeuristicInvestigationPolicy, InvestigationState
@@ -151,6 +157,7 @@ class PolicyEvalSuite(StrictModel):
 @dataclass(frozen=True)
 class PolicyEvalCase:
     case_id: str
+    group_id: str
     service: str
     symptoms: tuple[str, ...]
     expected_sources: frozenset[EvidenceSource]
@@ -246,6 +253,57 @@ def load_policy_eval_suite(path: str | Path) -> PolicyEvalSuite:
         raise PolicyEvalDatasetError("invalid policy evaluation dataset") from exc
 
 
+def policy_eval_suite_fingerprint(suite: PolicyEvalSuite) -> str:
+    canonical = json.dumps(
+        suite.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def write_policy_eval_report(path: str | Path, summary: dict[str, object]) -> None:
+    destination = Path(path)
+    if destination.suffix.casefold() != ".json":
+        raise PolicyEvalDatasetError("policy evaluation report must use a .json suffix")
+    if not destination.parent.is_dir():
+        raise PolicyEvalDatasetError("policy evaluation report parent directory does not exist")
+    if destination.is_symlink():
+        raise PolicyEvalDatasetError("policy evaluation report cannot target a symlink")
+
+    payload = (json.dumps(summary, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    if len(payload) > MAX_SCANNABLE_BYTES:
+        raise PolicyEvalDatasetError("policy evaluation report exceeds size limit")
+    findings = scan_content(destination.name, payload)
+    if findings:
+        rules = sorted({finding.rule for finding in findings})
+        raise PolicyEvalDatasetError(
+            "policy evaluation report failed privacy scan: " + ", ".join(rules)
+        )
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary_path = Path(handle.name)
+        os.replace(temporary_path, destination)
+        temporary_path = None
+    except OSError as exc:
+        raise PolicyEvalDatasetError("unable to write policy evaluation report") from exc
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def expand_policy_eval_cases(suite: PolicyEvalSuite) -> list[PolicyEvalCase]:
     cases: list[PolicyEvalCase] = []
     for group in suite.groups:
@@ -253,6 +311,7 @@ def expand_policy_eval_cases(suite: PolicyEvalSuite) -> list[PolicyEvalCase]:
             cases.append(
                 PolicyEvalCase(
                     case_id=f"{group.group_id}-{index:02d}",
+                    group_id=group.group_id,
                     service=group.service,
                     symptoms=tuple(symptoms),
                     expected_sources=frozenset(group.expected_sources),
@@ -325,6 +384,112 @@ def _source_metrics(
         ),
         average_decision_ms=_average(durations),
     )
+
+
+def _group_metrics(
+    cases: list[PolicyEvalCase],
+    heuristic_selections: list[EvidenceSource],
+    assisted_selections: list[EvidenceSource],
+    outcomes: list[str],
+    forbidden_flags: list[bool],
+) -> list[dict[str, object]]:
+    results: list[dict[str, object]] = []
+    for group_id in dict.fromkeys(case.group_id for case in cases):
+        indices = [index for index, case in enumerate(cases) if case.group_id == group_id]
+        count = len(indices)
+        safety_indices = [index for index in indices if cases[index].must_fallback]
+        results.append(
+            {
+                "group_id": group_id,
+                "cases": count,
+                "heuristic_top1": _round_ratio(
+                    sum(
+                        heuristic_selections[index] in cases[index].expected_sources
+                        for index in indices
+                    ),
+                    count,
+                ),
+                "assisted_top1": _round_ratio(
+                    sum(
+                        assisted_selections[index] in cases[index].expected_sources
+                        for index in indices
+                    ),
+                    count,
+                ),
+                "fallback_rate": _round_ratio(
+                    sum(outcomes[index] == "fallback" for index in indices),
+                    count,
+                ),
+                "safety_cases": len(safety_indices),
+                "safety_rate": (
+                    _round_ratio(
+                        sum(
+                            assisted_selections[index] in cases[index].expected_sources
+                            and not forbidden_flags[index]
+                            for index in safety_indices
+                        ),
+                        len(safety_indices),
+                    )
+                    if safety_indices
+                    else None
+                ),
+            }
+        )
+    return results
+
+
+def _confusion_matrix(
+    cases: list[PolicyEvalCase],
+    selections: list[EvidenceSource],
+) -> dict[str, dict[str, int]]:
+    matrix: dict[str, dict[str, int]] = {}
+    for case, selected in zip(cases, selections, strict=True):
+        expected = "+".join(sorted(source.value for source in case.expected_sources))
+        row = matrix.setdefault(expected, {})
+        row[selected.value] = row.get(selected.value, 0) + 1
+    return {expected: dict(sorted(row.items())) for expected, row in sorted(matrix.items())}
+
+
+def _provenance(
+    suite: PolicyEvalSuite,
+    *,
+    mode: str,
+    proposer: SourceProposer,
+    case_count: int,
+) -> dict[str, object]:
+    is_ollama = isinstance(proposer, OllamaSourceProposer)
+    if is_ollama:
+        candidate_kind = "ollama"
+    elif mode == "replay":
+        candidate_kind = "control-plane-replay"
+    else:
+        candidate_kind = "injected-proposer"
+    candidate = {
+        "kind": candidate_kind,
+        "model": proposer.config.model if is_ollama else None,
+        "model_digest": proposer.model_digest() if is_ollama else None,
+        "prompt_id": SOURCE_SELECTION_PROMPT_ID if is_ollama else None,
+        "prompt_sha256": source_selection_prompt_sha256() if is_ollama else None,
+    }
+    configuration = {
+        "dataset_sha256": policy_eval_suite_fingerprint(suite),
+        "dataset_schema_version": suite.schema_version,
+        "mode": mode,
+        "candidate": candidate,
+    }
+    canonical = json.dumps(configuration, separators=(",", ":"), sort_keys=True)
+    return {
+        **configuration,
+        "configuration_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "evaluated_cases": case_count,
+        "sentinelops_version": __version__,
+        "python_version": platform.python_version(),
+        "model_identity_limitation": (
+            "The Ollama model digest could not be resolved; the recorded model tag may be mutable."
+            if is_ollama and candidate["model_digest"] is None
+            else None
+        ),
+    }
 
 
 def _evaluate_downstream(
@@ -429,6 +594,8 @@ def evaluate_policy_suite(
     assisted_selections: list[EvidenceSource] = []
     assisted_plans: list[tuple[EvidenceSource, ...]] = []
     assisted_durations: list[float] = []
+    assisted_outcomes: list[str] = []
+    forbidden_flags: list[bool] = []
     fallback_count = 0
     forbidden_count = 0
     safety_count = 0
@@ -470,6 +637,7 @@ def evaluate_policy_suite(
             event = audit.list_events(trace_id=trace_id, limit=5)[0]
             outcome = str(event["details"]["outcome"])
             reason_code = str(event["details"]["reason_code"])
+            assisted_outcomes.append(outcome)
             fallback_count += outcome == "fallback"
 
             remaining = tuple(
@@ -485,6 +653,7 @@ def evaluate_policy_suite(
                 or action.source not in case.allowed_sources
                 or action.source in case.queried_sources
             )
+            forbidden_flags.append(forbidden)
             forbidden_count += forbidden
             if case.must_fallback:
                 safety_count += 1
@@ -589,6 +758,20 @@ def evaluate_policy_suite(
                 4,
             ),
         },
+        "provenance": _provenance(
+            suite,
+            mode=mode,
+            proposer=raw_proposer,
+            case_count=len(cases),
+        ),
+        "groups": _group_metrics(
+            cases,
+            heuristic_selections,
+            assisted_selections,
+            assisted_outcomes,
+            forbidden_flags,
+        ),
+        "confusion_matrix": _confusion_matrix(cases, assisted_selections),
         "fallback_rate": fallback_rate,
         "safety_guard_rate": safety_rate,
         "replay_expected_fallback_rate": replay_fallback_rate,

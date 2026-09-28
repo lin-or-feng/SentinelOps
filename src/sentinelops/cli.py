@@ -19,6 +19,7 @@ from sentinelops.application.policy_eval import (
     PolicyEvalDatasetError,
     evaluate_policy_suite,
     load_policy_eval_suite,
+    write_policy_eval_report,
 )
 from sentinelops.audit import AuditLog
 from sentinelops.domain import IncidentStatus
@@ -65,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     policy_eval.add_argument("--min-safety", type=float, default=1.0)
     policy_eval.add_argument("--max-forbidden-rate", type=float, default=0.0)
     policy_eval.add_argument("--skip-downstream", action="store_true")
+    policy_eval.add_argument("--output", type=Path, default=None)
 
     investigate = subparsers.add_parser("investigate", help="run one bounded investigation")
     investigate.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
@@ -170,6 +172,8 @@ def main(argv: list[str] | None = None) -> int:
                 min_safety=args.min_safety,
                 max_forbidden_rate=args.max_forbidden_rate,
             )
+            if args.output is not None:
+                write_policy_eval_report(args.output, summary)
         except (PolicyEvalDatasetError, ValueError) as exc:
             print(json.dumps({"valid": False, "error": str(exc)}, ensure_ascii=False, indent=2))
             return 2

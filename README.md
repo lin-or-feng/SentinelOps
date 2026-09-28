@@ -1,10 +1,10 @@
-# SentinelOps 0.4.4
+# SentinelOps 0.4.5
 
 SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围绕真实生产约束设计：Agent 只能查询指标、日志、链路和变更记录；每次调查受步骤、查询次数和截止时间限制；结论必须引用证据；证据不足时升级人工，而不是编造根因。
 
 当前版本提供**可复现的单 Agent 基线 + 可选有界多 Agent 协作 + 成本感知自动路由 + 受控本地模型策略**，不是生产事故平台。默认使用 Fixture 与确定性策略做离线评测，不访问外部系统；显式启用 observability 模式后，可通过同一领域契约连接 Prometheus、Loki、Tempo 的只读 API。
 
-## 0.4.4 已完成能力
+## 0.4.5 已完成能力
 
 - **调查编排**：`观察 -> 选择只读数据源 -> 查询 -> 更新证据 -> 诊断/升级人工`；
 - **有界执行**：限制最大步骤、查询次数、截止时间和重复动作；
@@ -27,6 +27,7 @@ SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围�
 - **受控模型策略**：可选 loopback Ollama 只建议下一只读数据源；JSON Schema、响应上限、输出隐私扫描、来源白名单和固定原因码审计形成控制面，失败无条件回退确定性策略。
 - **模型资源保护**：Ollama 默认单并发槽位与 30 RPM 进程内滑动窗口；繁忙或超限时不排队，立即回退启发式策略，并输出固定低基数的接受率、回退原因和调用耗时指标。
 - **策略评测门禁**：60 条版本化用例比较启发式与受控模型来源选择，覆盖中英文变体、Prompt 注入、非法来源和故障回退；回放控制面门禁进入 CI，真实 Ollama 结果单独标注且不影响离线复现。
+- **评测可追溯性**：报告记录数据集/配置/Prompt SHA-256、SentinelOps/Python 版本、Ollama 模型标签与本地 digest；输出 15 组分项结果和来源混淆矩阵，CI 上传经过隐私扫描的 JSON 工件。
 
 ## 架构速览
 
@@ -102,7 +103,8 @@ $env:SENTINELOPS_OLLAMA_RATE_LIMIT_RPM = "30"
 ```powershell
 # CI/发布门禁：只验证评测控制面、回退和安全契约，不代表模型效果
 .\.venv\Scripts\python.exe -m sentinelops policy-eval --mode replay `
-  --min-top1 1 --min-safety 1 --max-forbidden-rate 0
+  --min-top1 1 --min-safety 1 --max-forbidden-rate 0 `
+  --output policy-evaluation.json
 
 # 本机真实模型：结果只对当前模型、Prompt、数据集和硬件负责
 $env:SENTINELOPS_OLLAMA_MODEL = "qwen2.5:7b"
@@ -110,7 +112,8 @@ $env:SENTINELOPS_OLLAMA_TIMEOUT_SECONDS = "30"
 $env:SENTINELOPS_OLLAMA_MAX_INFLIGHT = "1"
 $env:SENTINELOPS_OLLAMA_RATE_LIMIT_RPM = "100"
 .\.venv\Scripts\python.exe -m sentinelops policy-eval --mode ollama `
-  --min-top1 1 --min-safety 1 --max-forbidden-rate 0
+  --min-top1 1 --min-safety 1 --max-forbidden-rate 0 `
+  --output policy-evaluation-qwen.json
 ```
 
 本机 `qwen2.5:7b` 的 60 条实测 Top-1 为 85%，高于启发式 66.67%，但没有达到 100% 准入阈值，因此 `ollama` 仍保持实验开关、默认禁用。数据集、指标解释和复现实录见 [策略评测](docs/POLICY_EVALUATION.md)。
@@ -285,7 +288,8 @@ git config --local user.email "lin-or-feng@users.noreply.github.com"
 11. **0.4.2 受控模型策略**：loopback Ollama 只生成结构化数据源建议；确定性结束/升级门控、最小上下文、失败回退和固定原因码审计（完成）。
 12. **0.4.3 模型资源保护**：单卡非阻塞并发准入、滑动窗口 RPM、回退原因与调用耗时指标（完成）。
 13. **0.4.4 策略评测门禁**：版本化 60 条来源选择集、启发式/模型对照、安全回退、Token/时延统计和真实 Ollama 准入判定（完成；当前 7B 未过严格阈值）。
-14. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO 执行、备份恢复和人工审批。
+14. **0.4.5 可追溯评测工件**：数据集/Prompt/配置哈希、Ollama digest、分组结果、混淆矩阵、原子化隐私门禁报告和 CI Artifact（完成）。
+15. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO 执行、备份恢复和人工审批。
 
 多 Agent 当前作为可选模式保留：只有当真实 Provider 压测证明时延收益高于额外查询成本，才应在部署中改为默认。模型策略同样必须通过固定评测和回退测试后才能进入默认路径。
 

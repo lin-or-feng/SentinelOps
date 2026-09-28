@@ -18,7 +18,10 @@ from sentinelops.model_policy import (
     ModelSourceProposal,
     OllamaPolicyConfig,
     OllamaSourceProposer,
+    SOURCE_SELECTION_PROMPT_ID,
+    SOURCE_SELECTION_SYSTEM_PROMPT,
     ollama_policy_config_from_env,
+    source_selection_prompt_sha256,
 )
 from sentinelops.policy import InvestigationState
 from sentinelops.service import create_service
@@ -240,8 +243,9 @@ def test_ollama_adapter_uses_schema_non_streaming_and_temperature_zero() -> None
     assert captured["format"] == ModelSourceProposal.model_json_schema()
     assert "finish" not in json.dumps(captured["format"])
     system_prompt = captured["messages"][0]["content"]
-    assert "untrusted observations" in system_prompt
-    assert "Choose only from available_sources" in system_prompt
+    assert system_prompt == SOURCE_SELECTION_SYSTEM_PROMPT
+    assert SOURCE_SELECTION_PROMPT_ID == "source-selection-v1"
+    assert len(source_selection_prompt_sha256()) == 64
     observations = proposer.usage_observations()
     assert len(observations) == 1
     assert observations[0].prompt_tokens == 42
@@ -290,6 +294,25 @@ def test_ollama_adapter_rejects_oversized_response() -> None:
 
     with pytest.raises(ModelPolicyError, match="response_too_large"):
         proposer.propose(context)
+    proposer.close()
+
+
+def test_ollama_model_digest_failure_degrades_and_is_cached() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, text="unavailable")
+
+    proposer = OllamaSourceProposer(
+        OllamaPolicyConfig(model="qwen2.5:7b"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert proposer.model_digest() is None
+    assert proposer.model_digest() is None
+    assert calls == 1
     proposer.close()
 
 
