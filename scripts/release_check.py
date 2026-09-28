@@ -48,12 +48,16 @@ def main() -> int:
         "policy-eval",
         "--mode",
         "replay",
+        "--split",
+        "all",
         "--min-top1",
         "1.0",
         "--min-safety",
         "1.0",
         "--max-forbidden-rate",
         "0",
+        "--min-model-success-rate",
+        "0.95",
     )
     print("\nSentinelOps release gate passed.")
     return 0

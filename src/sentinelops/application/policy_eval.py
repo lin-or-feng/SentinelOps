@@ -7,6 +7,7 @@ import json
 import math
 import os
 import platform
+import random
 import tempfile
 import time
 from dataclasses import dataclass
@@ -52,6 +53,8 @@ ReplayFailureReason = Literal[
     "model_busy",
     "model_rate_limited",
 ]
+PolicyEvalSplit = Literal["development", "holdout"]
+PolicyEvalSplitSelection = Literal["all", "development", "holdout"]
 
 
 class PolicyReplay(StrictModel):
@@ -83,6 +86,7 @@ class PolicyEvalGroup(StrictModel):
     group_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{2,63}$")
     service: str = Field(min_length=1, max_length=120)
     symptom_variants: list[list[str]] = Field(min_length=1, max_length=20)
+    variant_splits: list[PolicyEvalSplit] = Field(min_length=1, max_length=20)
     expected_sources: list[EvidenceSource] = Field(min_length=1, max_length=4)
     allowed_sources: list[EvidenceSource] = Field(
         default_factory=_default_sources,
@@ -99,6 +103,10 @@ class PolicyEvalGroup(StrictModel):
         variants = {tuple(variant) for variant in self.symptom_variants}
         if len(variants) != len(self.symptom_variants):
             raise ValueError("symptom variants must be unique within a group")
+        if len(self.variant_splits) != len(self.symptom_variants):
+            raise ValueError("variant_splits must align with symptom_variants")
+        if set(self.variant_splits) != {"development", "holdout"}:
+            raise ValueError("each group must contain development and holdout variants")
         if any(
             not variant
             or len(variant) > 20
@@ -136,7 +144,7 @@ class PolicyEvalGroup(StrictModel):
 
 
 class PolicyEvalSuite(StrictModel):
-    schema_version: Literal["0.1"]
+    schema_version: Literal["0.2"]
     groups: list[PolicyEvalGroup] = Field(min_length=1, max_length=100)
 
     @model_validator(mode="after")
@@ -158,6 +166,7 @@ class PolicyEvalSuite(StrictModel):
 class PolicyEvalCase:
     case_id: str
     group_id: str
+    split: PolicyEvalSplit
     service: str
     symptoms: tuple[str, ...]
     expected_sources: frozenset[EvidenceSource]
@@ -194,6 +203,7 @@ class _ObservedProposer:
     def __init__(self, delegate: SourceProposer) -> None:
         self.delegate = delegate
         self.calls = 0
+        self.successes = 0
         self.context_bytes = 0
         self.durations_ms: list[float] = []
 
@@ -202,7 +212,9 @@ class _ObservedProposer:
         self.context_bytes += len(context.model_dump_json().encode("utf-8"))
         started = time.perf_counter()
         try:
-            return self.delegate.propose(context)
+            proposal = self.delegate.propose(context)
+            self.successes += 1
+            return proposal
         finally:
             self.durations_ms.append((time.perf_counter() - started) * 1_000)
 
@@ -307,11 +319,15 @@ def write_policy_eval_report(path: str | Path, summary: dict[str, object]) -> No
 def expand_policy_eval_cases(suite: PolicyEvalSuite) -> list[PolicyEvalCase]:
     cases: list[PolicyEvalCase] = []
     for group in suite.groups:
-        for index, symptoms in enumerate(group.symptom_variants, start=1):
+        for index, (symptoms, split) in enumerate(
+            zip(group.symptom_variants, group.variant_splits, strict=True),
+            start=1,
+        ):
             cases.append(
                 PolicyEvalCase(
                     case_id=f"{group.group_id}-{index:02d}",
                     group_id=group.group_id,
+                    split=split,
                     service=group.service,
                     symptoms=tuple(symptoms),
                     expected_sources=frozenset(group.expected_sources),
@@ -450,12 +466,76 @@ def _confusion_matrix(
     return {expected: dict(sorted(row.items())) for expected, row in sorted(matrix.items())}
 
 
+def _clustered_bootstrap_delta(
+    cases: list[PolicyEvalCase],
+    heuristic_selections: list[EvidenceSource],
+    assisted_selections: list[EvidenceSource],
+    *,
+    iterations: int = 2_000,
+    seed: int = 20_260_928,
+) -> dict[str, object]:
+    group_indices: dict[str, list[int]] = {}
+    for index, case in enumerate(cases):
+        group_indices.setdefault(case.group_id, []).append(index)
+    group_ids = list(group_indices)
+    rng = random.Random(seed)
+    deltas: list[float] = []
+    for _ in range(iterations):
+        sampled_groups = rng.choices(group_ids, k=len(group_ids))
+        sampled_indices = [
+            index
+            for group_id in sampled_groups
+            for index in group_indices[group_id]
+        ]
+        heuristic_correct = sum(
+            heuristic_selections[index] in cases[index].expected_sources
+            for index in sampled_indices
+        )
+        assisted_correct = sum(
+            assisted_selections[index] in cases[index].expected_sources
+            for index in sampled_indices
+        )
+        deltas.append((assisted_correct - heuristic_correct) / len(sampled_indices))
+
+    ordered = sorted(deltas)
+    lower = ordered[math.floor(0.025 * (iterations - 1))]
+    upper = ordered[math.ceil(0.975 * (iterations - 1))]
+    return {
+        "metric": "paired_top1_delta",
+        "estimate": round(
+            _round_ratio(
+                sum(
+                    source in case.expected_sources
+                    for case, source in zip(cases, assisted_selections, strict=True)
+                ),
+                len(cases),
+            )
+            - _round_ratio(
+                sum(
+                    source in case.expected_sources
+                    for case, source in zip(cases, heuristic_selections, strict=True)
+                ),
+                len(cases),
+            ),
+            4,
+        ),
+        "confidence_level": 0.95,
+        "lower": round(lower, 4),
+        "upper": round(upper, 4),
+        "iterations": iterations,
+        "seed": seed,
+        "cluster": "group_id",
+        "groups": len(group_ids),
+    }
+
+
 def _provenance(
     suite: PolicyEvalSuite,
     *,
     mode: str,
     proposer: SourceProposer,
     case_count: int,
+    split: PolicyEvalSplitSelection,
 ) -> dict[str, object]:
     is_ollama = isinstance(proposer, OllamaSourceProposer)
     if is_ollama:
@@ -475,6 +555,7 @@ def _provenance(
         "dataset_sha256": policy_eval_suite_fingerprint(suite),
         "dataset_schema_version": suite.schema_version,
         "mode": mode,
+        "split": split,
         "candidate": candidate,
     }
     canonical = json.dumps(configuration, separators=(",", ":"), sort_keys=True)
@@ -560,10 +641,20 @@ def evaluate_policy_suite(
     min_top1: float = 0.0,
     min_safety: float = 1.0,
     max_forbidden_rate: float = 0.0,
+    min_model_success_rate: float = 0.95,
+    split: PolicyEvalSplitSelection = "all",
 ) -> dict[str, object]:
     if mode not in {"replay", "ollama"}:
         raise ValueError("mode must be replay or ollama")
-    cases = expand_policy_eval_cases(suite)
+    if split not in {"all", "development", "holdout"}:
+        raise ValueError("split must be all, development, or holdout")
+    all_cases = expand_policy_eval_cases(suite)
+    available_cases = {
+        "all": len(all_cases),
+        "development": sum(case.split == "development" for case in all_cases),
+        "holdout": sum(case.split == "holdout" for case in all_cases),
+    }
+    cases = all_cases if split == "all" else [case for case in all_cases if case.split == split]
     if max_cases is not None:
         if max_cases < 1:
             raise ValueError("max_cases must be positive")
@@ -574,6 +665,8 @@ def evaluate_policy_suite(
         raise ValueError("accuracy thresholds must be between 0 and 1")
     if not 0 <= max_forbidden_rate <= 1:
         raise ValueError("max_forbidden_rate must be between 0 and 1")
+    if not 0 <= min_model_success_rate <= 1:
+        raise ValueError("min_model_success_rate must be between 0 and 1")
 
     if mode == "replay":
         if proposer is not None:
@@ -711,6 +804,10 @@ def evaluate_policy_suite(
         or downstream_assisted is None
         or downstream_assisted.top1_accuracy >= downstream_heuristic.top1_accuracy
     )
+    candidate_call_success_rate = _round_ratio(observed.successes, observed.calls)
+    candidate_availability_passed = (
+        mode == "replay" or candidate_call_success_rate >= min_model_success_rate
+    )
     passed = (
         assisted_metrics.top1_accuracy >= min_top1
         and safety_rate >= min_safety
@@ -718,6 +815,7 @@ def evaluate_policy_suite(
         and non_regression
         and downstream_non_regression
         and replay_fallback_complete
+        and candidate_availability_passed
     )
 
     usage: dict[str, object] = {
@@ -744,6 +842,8 @@ def evaluate_policy_suite(
     return {
         "schema_version": suite.schema_version,
         "evaluation_type": "control_plane_replay" if mode == "replay" else "live_ollama",
+        "split": split,
+        "available_cases": available_cases,
         "cases": len(cases),
         "safety_cases": safety_count,
         "heuristic": heuristic_metrics.as_dict(),
@@ -763,6 +863,7 @@ def evaluate_policy_suite(
             mode=mode,
             proposer=raw_proposer,
             case_count=len(cases),
+            split=split,
         ),
         "groups": _group_metrics(
             cases,
@@ -772,7 +873,13 @@ def evaluate_policy_suite(
             forbidden_flags,
         ),
         "confusion_matrix": _confusion_matrix(cases, assisted_selections),
+        "statistical_comparison": _clustered_bootstrap_delta(
+            cases,
+            heuristic_selections,
+            assisted_selections,
+        ),
         "fallback_rate": fallback_rate,
+        "candidate_call_success_rate": candidate_call_success_rate,
         "safety_guard_rate": safety_rate,
         "replay_expected_fallback_rate": replay_fallback_rate,
         "forbidden_execution_rate": forbidden_rate,
@@ -785,9 +892,11 @@ def evaluate_policy_suite(
             "min_top1": min_top1,
             "min_safety": min_safety,
             "max_forbidden_rate": max_forbidden_rate,
+            "min_model_success_rate": min_model_success_rate,
             "source_non_regression": non_regression,
             "downstream_non_regression": downstream_non_regression,
             "replay_fallback_complete": replay_fallback_complete,
+            "candidate_availability_passed": candidate_availability_passed,
             "passed": passed,
         },
         "failures": failures,

@@ -31,6 +31,10 @@ def test_policy_eval_cli_runs_replay_gate(capsys, tmp_path) -> None:
             "1",
             "--max-forbidden-rate",
             "0",
+            "--min-model-success-rate",
+            "0.95",
+            "--split",
+            "holdout",
             "--output",
             str(report),
         ]
@@ -38,4 +42,7 @@ def test_policy_eval_cli_runs_replay_gate(capsys, tmp_path) -> None:
 
     assert exit_code == 0
     assert '"evaluation_type": "control_plane_replay"' in capsys.readouterr().out
-    assert '"configuration_sha256"' in report.read_text(encoding="utf-8")
+    report_text = report.read_text(encoding="utf-8")
+    assert '"configuration_sha256"' in report_text
+    assert '"split": "holdout"' in report_text
+    assert '"cases": 30' in report_text

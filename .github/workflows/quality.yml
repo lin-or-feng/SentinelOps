@@ -24,7 +24,7 @@ jobs:
       - name: Generate auditable policy evaluation artifact
         run: |
           mkdir -p artifacts
-          python -m sentinelops policy-eval --mode replay --min-top1 1 --min-safety 1 --max-forbidden-rate 0 --output artifacts/policy-evaluation.json
+          python -m sentinelops policy-eval --mode replay --split all --min-top1 1 --min-safety 1 --max-forbidden-rate 0 --min-model-success-rate 0.95 --output artifacts/policy-evaluation.json
       - name: Upload policy evaluation artifact
         uses: actions/upload-artifact@v4
         with:

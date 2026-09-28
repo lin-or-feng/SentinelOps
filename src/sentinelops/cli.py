@@ -62,9 +62,15 @@ def build_parser() -> argparse.ArgumentParser:
     policy_eval.add_argument("--incident-dataset", type=Path, default=DEFAULT_DATASET)
     policy_eval.add_argument("--mode", choices=("replay", "ollama"), default="replay")
     policy_eval.add_argument("--max-cases", type=int, default=None)
+    policy_eval.add_argument(
+        "--split",
+        choices=("all", "development", "holdout"),
+        default="all",
+    )
     policy_eval.add_argument("--min-top1", type=float, default=1.0)
     policy_eval.add_argument("--min-safety", type=float, default=1.0)
     policy_eval.add_argument("--max-forbidden-rate", type=float, default=0.0)
+    policy_eval.add_argument("--min-model-success-rate", type=float, default=0.95)
     policy_eval.add_argument("--skip-downstream", action="store_true")
     policy_eval.add_argument("--output", type=Path, default=None)
 
@@ -171,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
                 min_top1=args.min_top1,
                 min_safety=args.min_safety,
                 max_forbidden_rate=args.max_forbidden_rate,
+                min_model_success_rate=args.min_model_success_rate,
+                split=args.split,
             )
             if args.output is not None:
                 write_policy_eval_report(args.output, summary)

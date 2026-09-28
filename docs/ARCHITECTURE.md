@@ -1,4 +1,4 @@
-# SentinelOps 0.4.5 架构
+# SentinelOps 0.4.6 架构
 
 ## 1. 设计目标与非目标
 
@@ -64,7 +64,7 @@ START
 | API 调用方 | 可选静态 Bearer、常量时间比较、精确 Host/CORS、请求体/RPM/并发边界、安全响应头 | OIDC、租户 RBAC、密钥轮换、TLS、跨副本租户配额与 DDoS 防护 |
 | 工具调用 | read-only 标志、来源白名单、Pydantic 参数、结果上限 | 每个真实提供方的最小权限凭据与 egress 控制 |
 | Agent 运行时 | 单 Agent 循环；可选 Supervisor/专项 Worker/Reviewer；共享查询/时间预算、按来源熔断 | 持久化异步任务、租户配额、强制取消与跨副本背压 |
-| 本地模型 | 默认关闭；loopback only、最小脱敏上下文、JSON Schema、禁代理/重定向、响应上限、单并发 + RPM、失败回退；60 条独立策略评测集；Prompt/数据集/Ollama digest 追踪 | 组织真实事故集、跨副本配额与 Token SLO |
+| 本地模型 | 默认关闭；loopback only、最小脱敏上下文、JSON Schema、禁代理/重定向、响应上限、单并发 + RPM、失败回退；60 条开发/隐藏分层策略集；Prompt/数据集/Ollama digest 追踪；调用成功率与 grouped bootstrap | 组织真实事故集、跨副本配额与 Token SLO |
 | 持久化 | SQLite 参数化 SQL、事故 ID 幂等 | PostgreSQL 事务、租户行级安全、备份恢复 |
 | 审计 | 脱敏、前向哈希链、可选 HMAC | KMS 托管密钥、不可变外部归档、多副本串行化 |
 | 容器 | non-root、只读 rootfs、drop capabilities | 镜像签名、SBOM、漏洞扫描、网络策略 |
@@ -93,6 +93,8 @@ Multi 模式中的消息是 `InvestigatorAssignment -> InvestigatorFinding -> Ev
 
 0.4.5 将评测输入与结果变成可审计工件：数据集采用规范化 JSON 哈希，系统 Prompt 采用稳定 ID + SHA-256，真实 Ollama 通过受限 `/api/tags` 只读请求解析本地模型 digest；每组准确率、回退率、安全率和来源混淆矩阵随报告输出。报告写入前再次执行隐私扫描，通过同目录临时文件与原子替换避免留下半写文件。
 
+0.4.6 将 15 个场景组内的文字变体固定拆成 30 条 development 与 30 条 holdout：Prompt 只允许根据 development 调整，holdout 负责最终准入。评测器以整个 `group_id` 为抽样单位执行 2,000 次 paired clustered bootstrap，防止把同一语义的改写当成独立样本；live 模式还要求候选调用成功率至少 95%，模型不可用导致的启发式回退不能伪装成模型效果。
+
 ## 8. 演进路线
 
 - Prometheus/Loki/Tempo 已通过统一 `EvidenceTool` 接入，并由脱敏回放集验证 Schema 与错误分类；下一步扩展未知字段、超时和冲突证据样本；
@@ -100,4 +102,4 @@ Multi 模式中的消息是 `InvestigatorAssignment -> InvestigatorFinding -> Ev
 - 同步请求 -> 持久化任务队列，支持取消、重试、死信和背压；
 - 静态 Bearer -> OIDC/OAuth2 + RBAC；
 - 本地日志 -> OpenTelemetry traces/metrics/logs 和独立审计归档；
-- 受控来源建议已有 60 条独立策略评测集；下一步登记模型/Prompt 哈希并接入组织真实事故集，在严格准入门槛达标前保持默认关闭。
+- 受控来源建议已有 60 条分层策略评测集、可追溯哈希、模型 digest、调用有效性门禁与 grouped bootstrap；下一步接入组织真实事故集并补多次独立运行，在严格准入门槛达标前保持默认关闭。
