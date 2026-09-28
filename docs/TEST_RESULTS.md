@@ -1,4 +1,4 @@
-# SentinelOps 0.4.2 测试结果
+# SentinelOps 0.4.3 测试结果
 
 - 日期：2026-09-28
 - Python：3.11.9
@@ -17,8 +17,8 @@
 | `compileall` 源码、测试与脚本 | 通过 |
 | 工作树候选文件隐私扫描（含未跟踪、未忽略文件） | 通过 |
 | 危险运行时调用与已知密钥格式扫描 | 通过 |
-| pytest | 99 passed |
-| `sentinelops` 行覆盖率 | 90.98%（门槛 80%） |
+| pytest | 106 passed |
+| `sentinelops` 行覆盖率 | 91.37%（门槛 80%） |
 | Provider 回放门禁 | 5/5 通过，Schema 漂移 0 |
 | 离线基线 | 4/4 Top-1 正确 |
 | 证据引用有效性 | 100% |
@@ -34,7 +34,7 @@
 
 | 项目 | 结果 |
 |---|---|
-| `GET /healthz` | 200，当前代码版本 0.4.2 |
+| `GET /healthz` | 200，当前代码版本 0.4.3 |
 | `GET /readyz` | SQLite 可用时 200，不可用时 503；不查询外部 Provider |
 | `POST /v1/investigations` | 201，诊断 `deployment_regression` |
 | 证据引用 | changes + logs 两个独立来源 |
@@ -90,7 +90,7 @@
 - 全局 `query_budget=1` 时只派发一个 Worker；Metrics Worker 连续失败时，Supervisor 记录降级并通过下一波 Logs/Traces 完成诊断；
 - Provider 返回错误事故、服务或来源的 Evidence 时，Gateway 以 `EvidenceContractError` 失败关闭；
 - 4 条事故 single/multi 的 Top-1 与证据有效率均为 100%；single 平均查询 2.5，multi 为 3.0；
-- 每次 Provider 查询加入 25 ms 受控等待后，本轮 single 平均 73.22 ms，multi 57.90 ms，multi 减少 15.32 ms；auto 平均 76.72 ms；
+- 每次 Provider 查询加入 25 ms 受控等待后，本轮 single 平均 74.23 ms，multi 61.47 ms，multi 减少 12.76 ms；auto 平均 88.98 ms；
 - Auto 在 4 条简单事故中选择 multi 为 0 次，保持 single 的 2.5 次平均查询；额外复杂跨域测试选择 multi，预算为 1 时强制 single；路由模式、实际选择和原因均进入关联审计。时延数字仅验证调度效果，受本机抖动影响，不代表生产 SLO。
 
 ## Docker 结果
@@ -110,3 +110,5 @@
 - 模型原始 rationale 与隐私命中值均未进入 Trace 或审计；
 - Service 端到端验证受控建议可改变首个来源，但查询预算、Gateway 和双来源诊断门控保持有效；
 - 以上均为无网络控制面测试；尚未声称真实模型提升诊断准确率。
+- 单并发槽测试确认第二个并发调用不排队并返回 `model_busy`；1 RPM 测试确认窗口内拒绝、61 秒后恢复；
+- 指标测试确认 accepted/fallback、固定原因码和模型调用耗时可观测，未知标签值归一化为安全枚举。

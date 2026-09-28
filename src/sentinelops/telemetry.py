@@ -19,6 +19,7 @@ PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 HTTP_DURATION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
 PROVIDER_DURATION_BUCKETS = (0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
 INVESTIGATION_DURATION_BUCKETS = (0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
+MODEL_POLICY_DURATION_BUCKETS = (0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
 SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$")
 SAFE_HTTP_METHODS = frozenset({"GET", "POST"})
 SAFE_HTTP_ROUTES = frozenset(
@@ -35,6 +36,21 @@ SAFE_HTTP_ROUTES = frozenset(
 SAFE_PROVIDER_STATUSES = frozenset({"ok", "error", "denied", "circuit_open"})
 SAFE_INVESTIGATION_OUTCOMES = frozenset(
     {"diagnosed", "needs_human", "conflict", "idempotent_replay", "error"}
+)
+SAFE_MODEL_POLICY_OUTCOMES = frozenset({"accepted", "fallback", "deterministic"})
+SAFE_MODEL_POLICY_REASONS = frozenset(
+    {
+        "proposal_accepted",
+        "deterministic_terminal",
+        "transport_failure",
+        "invalid_structured_output",
+        "response_too_large",
+        "private_output_rejected",
+        "source_outside_guard",
+        "model_busy",
+        "model_rate_limited",
+        "unexpected_model_failure",
+    }
 )
 
 
@@ -130,6 +146,8 @@ class OperationalMetrics:
         self._provider_duration: dict[tuple[str, str], _Histogram] = {}
         self._investigations: dict[str, int] = defaultdict(int)
         self._investigation_duration: dict[str, _Histogram] = {}
+        self._model_policy_decisions: dict[tuple[str, str], int] = defaultdict(int)
+        self._model_policy_duration: dict[str, _Histogram] = {}
         self._circuit_open: dict[str, int] = {}
 
     def record_http(
@@ -183,6 +201,28 @@ class OperationalMetrics:
                 _Histogram.create(INVESTIGATION_DURATION_BUCKETS),
             )
             histogram.observe(duration_seconds)
+
+    def record_model_policy(
+        self,
+        *,
+        outcome: str,
+        reason_code: str,
+        duration_seconds: float | None,
+    ) -> None:
+        safe_outcome = outcome if outcome in SAFE_MODEL_POLICY_OUTCOMES else "fallback"
+        safe_reason = (
+            reason_code
+            if reason_code in SAFE_MODEL_POLICY_REASONS
+            else "unexpected_model_failure"
+        )
+        with self._lock:
+            self._model_policy_decisions[(safe_outcome, safe_reason)] += 1
+            if duration_seconds is not None:
+                histogram = self._model_policy_duration.setdefault(
+                    safe_outcome,
+                    _Histogram.create(MODEL_POLICY_DURATION_BUCKETS),
+                )
+                histogram.observe(duration_seconds)
 
     @staticmethod
     def _escape_label(value: str) -> str:
@@ -254,6 +294,11 @@ class OperationalMetrics:
                 key: self._copy_histogram(value)
                 for key, value in self._investigation_duration.items()
             }
+            model_policy_decisions = dict(self._model_policy_decisions)
+            model_policy_duration = {
+                key: self._copy_histogram(value)
+                for key, value in self._model_policy_duration.items()
+            }
             circuit_open = dict(self._circuit_open)
 
         lines = [
@@ -308,6 +353,24 @@ class OperationalMetrics:
             name="sentinelops_investigation_duration_seconds",
             help_text="Investigation duration in seconds.",
             values=investigation_duration,
+            label_names=("outcome",),
+        )
+        lines.extend(
+            (
+                "# HELP sentinelops_model_policy_decisions_total Total controlled model policy decisions.",
+                "# TYPE sentinelops_model_policy_decisions_total counter",
+            )
+        )
+        for (outcome, reason_code), count in sorted(model_policy_decisions.items()):
+            lines.append(
+                "sentinelops_model_policy_decisions_total"
+                f"{self._labels(outcome=outcome, reason_code=reason_code)} {count}"
+            )
+        self._render_histogram(
+            lines,
+            name="sentinelops_model_policy_call_duration_seconds",
+            help_text="Controlled model policy call duration in seconds.",
+            values=model_policy_duration,
             label_names=("outcome",),
         )
         lines.extend(

@@ -25,6 +25,16 @@ def test_metrics_registry_uses_fixed_low_cardinality_dimensions() -> None:
     )
     registry.set_circuit(EvidenceSource.LOGS, opened=True)
     registry.record_investigation(outcome="unexpected-outcome", duration_seconds=0.1)
+    registry.record_model_policy(
+        outcome="accepted",
+        reason_code="proposal_accepted",
+        duration_seconds=0.2,
+    )
+    registry.record_model_policy(
+        outcome="untrusted-outcome",
+        reason_code="untrusted-reason",
+        duration_seconds=None,
+    )
 
     rendered = registry.render_prometheus()
 
@@ -34,6 +44,15 @@ def test_metrics_registry_uses_fixed_low_cardinality_dimensions() -> None:
     assert 'source="logs",status="error"' in rendered
     assert 'outcome="needs_human"' in rendered
     assert 'sentinelops_provider_circuit_open{source="logs"} 1' in rendered
+    assert (
+        'sentinelops_model_policy_decisions_total{outcome="accepted",reason_code="proposal_accepted"} 1'
+        in rendered
+    )
+    assert (
+        'sentinelops_model_policy_decisions_total{outcome="fallback",reason_code="unexpected_model_failure"} 1'
+        in rendered
+    )
+    assert 'sentinelops_model_policy_call_duration_seconds_count{outcome="accepted"} 1' in rendered
     assert "/private/dynamic/value" not in rendered
     assert rendered.endswith("\n")
 

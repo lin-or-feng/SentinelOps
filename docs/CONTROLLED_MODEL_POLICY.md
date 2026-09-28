@@ -2,7 +2,7 @@
 
 ## 1. 为什么引入模型，但不把控制权交给模型
 
-确定性规则适合执行权限、预算、证据门控和终止条件；模型更适合在症状表达不稳定时给数据源排序。0.4.2 因此采用“模型建议、规则裁决”：本地模型只能建议下一只读 `EvidenceSource`，不能决定完成、升级、工具参数、查询语言或任何写操作。
+确定性规则适合执行权限、预算、证据门控和终止条件；模型更适合在症状表达不稳定时给数据源排序。0.4.2 因此采用“模型建议、规则裁决”：本地模型只能建议下一只读 `EvidenceSource`，不能决定完成、升级、工具参数、查询语言或任何写操作。0.4.3 又增加模型专用并发与频率准入，防止本地单卡被请求洪峰拖垮。
 
 默认仍是 `heuristic`。`ollama` 是显式选择的宿主机实验能力，不是发布门禁、Docker 复现或生产运行的前置依赖。
 
@@ -82,6 +82,8 @@ InvestigationState
 - 输出含隐私：`private_output_rejected`；
 - 建议不在白名单或已查询：`source_outside_guard`；
 - 未分类适配器失败：`unexpected_model_failure`。
+- 模型并发槽已占满：`model_busy`；
+- 60 秒滑动窗口已达上限：`model_rate_limited`。
 
 每次接受、回退或确定性终止都写入 `controlled-model-policy / model_source_proposed` 审计事件。事件只含 `outcome`、`reason_code` 和被接受的来源，不含 Prompt、模型响应或异常正文。
 
@@ -93,11 +95,22 @@ $env:SENTINELOPS_OLLAMA_MODEL = "qwen3:8b"
 $env:SENTINELOPS_OLLAMA_URL = "http://127.0.0.1:11434"
 $env:SENTINELOPS_OLLAMA_TIMEOUT_SECONDS = "8"
 $env:SENTINELOPS_OLLAMA_MAX_RESPONSE_BYTES = "65536"
+$env:SENTINELOPS_OLLAMA_MAX_INFLIGHT = "1"
+$env:SENTINELOPS_OLLAMA_RATE_LIMIT_RPM = "30"
 .\.venv\Scripts\python.exe -m sentinelops investigate `
   --incident-id inc-deploy-001 --orchestration-mode auto
 ```
 
 配置在创建数据库和 HTTP 客户端前校验。模型名必须显式给出；URL 不是 loopback 时启动失败。测试使用 `httpx.MockTransport`，验证请求包含 JSON Schema、`stream=false` 与 `temperature=0`，不会依赖真实模型或网络。
+
+并发槽使用非阻塞 `BoundedSemaphore`：默认只允许一个在途推理，槽满不等待，直接让本次调查使用规则策略。RPM 使用线程安全的进程内 60 秒滑动窗口，默认 30 次；仅成功取得并发槽的模型尝试才消耗配额。该控制保护单进程和单卡，不是多副本分布式限流。
+
+可观测指标包括：
+
+- `sentinelops_model_policy_decisions_total{outcome,reason_code}`；
+- `sentinelops_model_policy_call_duration_seconds{outcome}`。
+
+标签值来自代码内固定枚举，不包含模型名、Prompt、响应、事故或租户字段。可用回退率和 P95 判断模型策略是否值得保留，而不是只看演示是否成功。
 
 ## 7. 当前边界与下一步
 

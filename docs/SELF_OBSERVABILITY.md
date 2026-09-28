@@ -37,9 +37,13 @@
 | `sentinelops_provider_query_duration_seconds` | Histogram | `source, status` | Provider 查询耗时 |
 | `sentinelops_investigations_total` | Counter | `outcome` | 调查完成、冲突和复用数量 |
 | `sentinelops_investigation_duration_seconds` | Histogram | `outcome` | 调查端到端耗时 |
+| `sentinelops_model_policy_decisions_total` | Counter | `outcome, reason_code` | 模型建议接受、回退和确定性终止数量 |
+| `sentinelops_model_policy_call_duration_seconds` | Histogram | `outcome` | 实际模型建议调用耗时；确定性终止不计入 |
 | `sentinelops_provider_circuit_open` | Gauge | `source` | 对应来源熔断是否打开 |
 
 允许的 route 是代码注册的模板，例如 `/v1/investigations/{incident_id}`；未知路径统一为 `unmatched`。HTTP 状态只保留 `2xx` 等类别。Provider status 只允许 `ok/error/denied/circuit_open`。
+
+模型策略 `outcome` 只允许 `accepted/fallback/deterministic`；`reason_code` 只允许代码内固定集合，例如 `proposal_accepted`、`model_busy`、`model_rate_limited`、`transport_failure`。模型名、Prompt、响应、异常正文和事故字段不会进入 label。
 
 ## 4. 结构化日志
 
@@ -62,6 +66,8 @@
 | Provider 查询 P95 | <= 5 秒 | 与默认单次超时一致 |
 | 熔断持续打开 | < 5 分钟 | 超时应通知人工检查上游 |
 | `needs_human` 比率 | 建立基线后设阈值 | 它可能表示正确拒答，不能直接当错误率 |
+| 模型策略回退率 | 建立基线后设阈值 | 区分 busy/rate-limit/transport/schema 等固定原因 |
+| 模型调用 P95 | <= 8 秒 | 与默认超时一致，持续接近上限应停用模型策略 |
 
 不建议直接对单个实例 Counter 告警；应在 Prometheus 中按实例聚合 rate，并结合最小流量窗口。`needs_human` 是安全行为，需要和事故类型、证据覆盖率共同分析。
 

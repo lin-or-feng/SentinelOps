@@ -1,10 +1,10 @@
-# SentinelOps 0.4.2
+# SentinelOps 0.4.3
 
 SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围绕真实生产约束设计：Agent 只能查询指标、日志、链路和变更记录；每次调查受步骤、查询次数和截止时间限制；结论必须引用证据；证据不足时升级人工，而不是编造根因。
 
 当前版本提供**可复现的单 Agent 基线 + 可选有界多 Agent 协作 + 成本感知自动路由 + 受控本地模型策略**，不是生产事故平台。默认使用 Fixture 与确定性策略做离线评测，不访问外部系统；显式启用 observability 模式后，可通过同一领域契约连接 Prometheus、Loki、Tempo 的只读 API。
 
-## 0.4.2 已完成能力
+## 0.4.3 已完成能力
 
 - **调查编排**：`观察 -> 选择只读数据源 -> 查询 -> 更新证据 -> 诊断/升级人工`；
 - **有界执行**：限制最大步骤、查询次数、截止时间和重复动作；
@@ -25,6 +25,7 @@ SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围�
 - **编排消融**：同一事故集比较 single/multi 的准确率、证据有效率、查询成本和受控 Provider 延迟，不把并发吞吐误写成准确率收益。
 - **自适应编排**：`auto` 根据查询预算、截止时间、多条跨域症状决定 single/multi；简单事故优先低成本单 Agent，选择理由进入关联审计链。
 - **受控模型策略**：可选 loopback Ollama 只建议下一只读数据源；JSON Schema、响应上限、输出隐私扫描、来源白名单和固定原因码审计形成控制面，失败无条件回退确定性策略。
+- **模型资源保护**：Ollama 默认单并发槽位与 30 RPM 进程内滑动窗口；繁忙或超限时不排队，立即回退启发式策略，并输出固定低基数的接受率、回退原因和调用耗时指标。
 
 ## 架构速览
 
@@ -87,11 +88,13 @@ $env:SENTINELOPS_POLICY_MODE = "ollama"
 $env:SENTINELOPS_OLLAMA_MODEL = "qwen3:8b" # 换成 ollama list 中已存在的模型
 $env:SENTINELOPS_OLLAMA_URL = "http://127.0.0.1:11434"
 $env:SENTINELOPS_OLLAMA_TIMEOUT_SECONDS = "8"
+$env:SENTINELOPS_OLLAMA_MAX_INFLIGHT = "1" # 单张消费级显卡建议保持 1
+$env:SENTINELOPS_OLLAMA_RATE_LIMIT_RPM = "30"
 .\.venv\Scripts\python.exe -m sentinelops investigate `
   --incident-id inc-deploy-001 --orchestration-mode single
 ```
 
-模型只返回 `{source, rationale}`，无权生成 PromQL/LogQL/TraceQL，无权决定 `finish`、`escalate`、预算、权限或写操作。发送上下文只含脱敏后的服务/症状、允许/已查询来源和各来源证据数量，不含 tenant、incident ID、Evidence 摘要、原始引用或凭据。非法 JSON、超时、非白名单/重复来源、隐私命中和超限响应均记录固定原因码并回退规则策略。详细边界见 [受控模型策略](docs/CONTROLLED_MODEL_POLICY.md)。
+模型只返回 `{source, rationale}`，无权生成 PromQL/LogQL/TraceQL，无权决定 `finish`、`escalate`、预算、权限或写操作。发送上下文只含脱敏后的服务/症状、允许/已查询来源和各来源证据数量，不含 tenant、incident ID、Evidence 摘要、原始引用或凭据。非法 JSON、超时、非白名单/重复来源、隐私命中、繁忙、频率超限和超限响应均记录固定原因码并回退规则策略。详细边界见 [受控模型策略](docs/CONTROLLED_MODEL_POLICY.md)。
 
 启动后可访问：
 
@@ -110,7 +113,7 @@ $env:SENTINELOPS_METRICS_ENABLED = "1"
 Invoke-WebRequest http://127.0.0.1:8000/metrics
 ```
 
-指标只使用固定路由模板、HTTP 状态类别、Provider 来源和有限结果枚举；不会将 incident ID、tenant、请求 ID、异常正文或 URL 查询参数写入 label。客户端可发送 8–64 位安全 `X-Request-ID`，服务会在响应中回传；非法格式或命中隐私规则的值会被替换。调查接口还返回 `X-SentinelOps-Trace-ID`，用于关联审计链。详细指标与建议 SLO 见 [自身可观测性](docs/SELF_OBSERVABILITY.md)。
+指标只使用固定路由模板、HTTP 状态类别、Provider 来源、模型策略固定原因码和有限结果枚举；不会将 incident ID、tenant、请求 ID、模型原文、异常正文或 URL 查询参数写入 label。客户端可发送 8–64 位安全 `X-Request-ID`，服务会在响应中回传；非法格式或命中隐私规则的值会被替换。调查接口还返回 `X-SentinelOps-Trace-ID`，用于关联审计链。详细指标与建议 SLO 见 [自身可观测性](docs/SELF_OBSERVABILITY.md)。
 
 ### API 边界配置
 
@@ -141,7 +144,7 @@ $env:SENTINELOPS_CORS_ORIGINS = "http://127.0.0.1:8501"
 
 `auto` 不默认滥用并发：查询预算少于 2 时强制 single；只有截止时间不超过 10 秒、至少两条症状明确跨越多个观测域，或出现三条以上独立症状时才选择 multi。路由器先写入 `orchestration_selected`，随后两个执行器共享相同 Gateway、Store、Audit 与安全策略。
 
-默认仍为 `single`，因为当前 4 条简单事故中强制 multi 没有提升准确率，平均查询反而从 2.5 增至 3.0。`auto` 在这 4 条中选择 multi 为 0 次，保持 2.5 次平均查询；复杂跨域契约测试则会选择 multi。本轮 25 ms/查询模拟下 single/multi/auto 分别为 73.22/57.90/76.72 ms，只证明并发调度，不能代替真实 Provider 压测。完整边界见 [多 Agent 编排说明](docs/MULTI_AGENT_ORCHESTRATION.md)。
+默认仍为 `single`，因为当前 4 条简单事故中强制 multi 没有提升准确率，平均查询反而从 2.5 增至 3.0。`auto` 在这 4 条中选择 multi 为 0 次，保持 2.5 次平均查询；复杂跨域契约测试则会选择 multi。本轮 25 ms/查询模拟下 single/multi/auto 分别为 74.23/61.47/88.98 ms，只证明并发调度且受本机抖动影响，不能代替真实 Provider 压测。完整边界见 [多 Agent 编排说明](docs/MULTI_AGENT_ORCHESTRATION.md)。
 
 API 调查请求示例：
 
@@ -261,7 +264,8 @@ git config --local user.email "lin-or-feng@users.noreply.github.com"
 9. **0.4 有界多 Agent 基线**：Supervisor、专项调查员、Reviewer、共享预算、波内并发、失败隔离与 single/multi 消融（完成）。
 10. **0.4.1 自适应编排**：成本感知 single/multi 路由、路由原因审计与 auto 消融（完成）。
 11. **0.4.2 受控模型策略**：loopback Ollama 只生成结构化数据源建议；确定性结束/升级门控、最小上下文、失败回退和固定原因码审计（完成）。
-12. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO 执行、备份恢复和人工审批。
+12. **0.4.3 模型资源保护**：单卡非阻塞并发准入、滑动窗口 RPM、回退原因与调用耗时指标（完成）。
+13. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO 执行、备份恢复和人工审批。
 
 多 Agent 当前作为可选模式保留：只有当真实 Provider 压测证明时延收益高于额外查询成本，才应在部署中改为默认。模型策略同样必须通过固定评测和回退测试后才能进入默认路径。
 

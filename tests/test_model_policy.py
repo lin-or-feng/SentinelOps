@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import httpx
@@ -276,6 +278,63 @@ def test_ollama_adapter_rejects_oversized_response() -> None:
     proposer.close()
 
 
+def test_ollama_adapter_rejects_concurrent_gpu_work_without_queueing() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        entered.set()
+        assert release.wait(timeout=2)
+        proposal = {"source": "logs", "rationale": "first request"}
+        return httpx.Response(200, json={"message": {"content": json.dumps(proposal)}})
+
+    proposer = OllamaSourceProposer(
+        OllamaPolicyConfig(model="qwen3:8b", max_inflight=1, rate_limit_rpm=10),
+        transport=httpx.MockTransport(handler),
+    )
+    context = ModelPolicyContext(
+        service="checkout-service",
+        symptoms=["latency"],
+        available_sources=[EvidenceSource.LOGS],
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(proposer.propose, context)
+        assert entered.wait(timeout=2)
+        with pytest.raises(ModelPolicyError, match="model_busy"):
+            proposer.propose(context)
+        release.set()
+        assert first.result(timeout=2).source == EvidenceSource.LOGS
+    proposer.close()
+
+
+def test_ollama_adapter_applies_sliding_window_rate_limit() -> None:
+    now = [0.0]
+    proposal = {"source": "logs", "rationale": "inspect errors"}
+    proposer = OllamaSourceProposer(
+        OllamaPolicyConfig(model="qwen3:8b", max_inflight=1, rate_limit_rpm=1),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={"message": {"content": json.dumps(proposal)}},
+            )
+        ),
+        clock=lambda: now[0],
+    )
+    context = ModelPolicyContext(
+        service="checkout-service",
+        symptoms=["latency"],
+        available_sources=[EvidenceSource.LOGS],
+    )
+
+    assert proposer.propose(context).source == EvidenceSource.LOGS
+    with pytest.raises(ModelPolicyError, match="model_rate_limited"):
+        proposer.propose(context)
+    now[0] = 61.0
+    assert proposer.propose(context).source == EvidenceSource.LOGS
+    proposer.close()
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -293,6 +352,33 @@ def test_ollama_config_rejects_non_loopback_or_credentialed_urls(url) -> None:
 def test_ollama_config_requires_explicit_model() -> None:
     with pytest.raises(ValueError, match="SENTINELOPS_OLLAMA_MODEL"):
         ollama_policy_config_from_env({})
+
+
+def test_ollama_config_reads_resource_limits() -> None:
+    config = ollama_policy_config_from_env(
+        {
+            "SENTINELOPS_OLLAMA_MODEL": "qwen3:8b",
+            "SENTINELOPS_OLLAMA_MAX_INFLIGHT": "2",
+            "SENTINELOPS_OLLAMA_RATE_LIMIT_RPM": "12",
+        }
+    )
+
+    assert config.max_inflight == 2
+    assert config.rate_limit_rpm == 12
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"max_inflight": 0},
+        {"max_inflight": 9},
+        {"rate_limit_rpm": 0},
+        {"rate_limit_rpm": 601},
+    ],
+)
+def test_ollama_config_rejects_unsafe_resource_limits(overrides) -> None:
+    with pytest.raises(ValueError):
+        OllamaPolicyConfig(model="qwen3:8b", **overrides)
 
 
 def test_service_rejects_invalid_policy_before_creating_database(tmp_path) -> None:
@@ -322,6 +408,15 @@ def test_service_runs_controlled_policy_end_to_end(tmp_path) -> None:
     assert result.report.tool_queries <= case.task.query_budget
     events = service.audit.list_events(trace_id=result.trace_id, limit=100)
     assert any(event["action"] == "model_source_proposed" for event in events)
+    rendered = service.metrics.render_prometheus()
+    assert (
+        'sentinelops_model_policy_decisions_total{outcome="accepted",reason_code="proposal_accepted"}'
+        in rendered
+    )
+    assert (
+        'sentinelops_model_policy_decisions_total{outcome="fallback",reason_code="source_outside_guard"}'
+        in rendered
+    )
     service.close()
 
 

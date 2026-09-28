@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections import Counter
+import threading
+import time
+from collections import Counter, deque
 from dataclasses import dataclass
 from ipaddress import ip_address
 from typing import Mapping, Protocol
@@ -18,6 +20,7 @@ from sentinelops.audit import AuditLog
 from sentinelops.domain import EvidenceSource, IncidentTask, InvestigationAction
 from sentinelops.policy import HeuristicInvestigationPolicy, InvestigationState
 from sentinelops.privacy import redact_private_text, scan_content
+from sentinelops.telemetry import OperationalMetrics
 
 
 class ModelPolicyError(RuntimeError):
@@ -75,6 +78,8 @@ class OllamaPolicyConfig:
     base_url: str = "http://127.0.0.1:11434"
     timeout_seconds: float = 8.0
     max_response_bytes: int = 65_536
+    max_inflight: int = 1
+    rate_limit_rpm: int = 30
 
     def __post_init__(self) -> None:
         model = self.model.strip()
@@ -106,6 +111,10 @@ class OllamaPolicyConfig:
             raise ValueError(
                 "SENTINELOPS_OLLAMA_MAX_RESPONSE_BYTES must be between 1024 and 65536"
             )
+        if not 1 <= self.max_inflight <= 8:
+            raise ValueError("SENTINELOPS_OLLAMA_MAX_INFLIGHT must be between 1 and 8")
+        if not 1 <= self.rate_limit_rpm <= 600:
+            raise ValueError("SENTINELOPS_OLLAMA_RATE_LIMIT_RPM must be between 1 and 600")
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -127,6 +136,8 @@ def ollama_policy_config_from_env(
     try:
         timeout = float(values.get("SENTINELOPS_OLLAMA_TIMEOUT_SECONDS", "8"))
         response_limit = int(values.get("SENTINELOPS_OLLAMA_MAX_RESPONSE_BYTES", "65536"))
+        max_inflight = int(values.get("SENTINELOPS_OLLAMA_MAX_INFLIGHT", "1"))
+        rate_limit_rpm = int(values.get("SENTINELOPS_OLLAMA_RATE_LIMIT_RPM", "30"))
     except ValueError as exc:
         raise ValueError("Ollama policy numeric settings must be valid numbers") from exc
     return OllamaPolicyConfig(
@@ -134,7 +145,43 @@ def ollama_policy_config_from_env(
         base_url=values.get("SENTINELOPS_OLLAMA_URL", "http://127.0.0.1:11434"),
         timeout_seconds=timeout,
         max_response_bytes=response_limit,
+        max_inflight=max_inflight,
+        rate_limit_rpm=rate_limit_rpm,
     )
+
+
+class _ModelAdmissionGuard:
+    """Non-blocking GPU concurrency and process-local sliding-window admission."""
+
+    def __init__(
+        self,
+        *,
+        max_inflight: int,
+        rate_limit_rpm: int,
+        clock=time.monotonic,
+    ) -> None:
+        self._slots = threading.BoundedSemaphore(max_inflight)
+        self._rate_limit = rate_limit_rpm
+        self._clock = clock
+        self._timestamps: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> str | None:
+        if not self._slots.acquire(blocking=False):
+            return "model_busy"
+        now = self._clock()
+        cutoff = now - 60.0
+        with self._lock:
+            while self._timestamps and self._timestamps[0] <= cutoff:
+                self._timestamps.popleft()
+            if len(self._timestamps) >= self._rate_limit:
+                self._slots.release()
+                return "model_rate_limited"
+            self._timestamps.append(now)
+        return None
+
+    def release(self) -> None:
+        self._slots.release()
 
 
 class OllamaSourceProposer:
@@ -145,6 +192,7 @@ class OllamaSourceProposer:
         config: OllamaPolicyConfig,
         *,
         transport: httpx.BaseTransport | None = None,
+        clock=time.monotonic,
     ) -> None:
         self.config = config
         self._client = httpx.Client(
@@ -154,57 +202,71 @@ class OllamaSourceProposer:
             trust_env=False,
             transport=transport,
         )
+        self._admission = _ModelAdmissionGuard(
+            max_inflight=config.max_inflight,
+            rate_limit_rpm=config.rate_limit_rpm,
+            clock=clock,
+        )
 
     def propose(self, context: ModelPolicyContext) -> ModelSourceProposal:
-        payload = {
-            "model": self.config.model,
-            "stream": False,
-            "format": ModelSourceProposal.model_json_schema(),
-            "options": {"temperature": 0},
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Choose exactly one available read-only evidence source. "
-                        "Do not decide finish, escalate, permissions, budgets, or query languages. "
-                        "Return only JSON matching the supplied schema."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": context.model_dump_json(),
-                },
-            ],
-        }
+        admission_failure = self._admission.acquire()
+        if admission_failure is not None:
+            raise ModelPolicyError(admission_failure)
         try:
-            with self._client.stream("POST", "/api/chat", json=payload) as response:
-                response.raise_for_status()
-                content_length = response.headers.get("content-length")
-                if (
-                    content_length is not None
-                    and int(content_length) > self.config.max_response_bytes
-                ):
-                    raise ModelPolicyError("response_too_large")
-                buffer = bytearray()
-                for chunk in response.iter_bytes():
-                    if len(buffer) + len(chunk) > self.config.max_response_bytes:
+            payload = {
+                "model": self.config.model,
+                "stream": False,
+                "format": ModelSourceProposal.model_json_schema(),
+                "options": {"temperature": 0},
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Choose exactly one available read-only evidence source. "
+                            "Do not decide finish, escalate, permissions, budgets, or query languages. "
+                            "Return only JSON matching the supplied schema."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": context.model_dump_json(),
+                    },
+                ],
+            }
+            try:
+                with self._client.stream("POST", "/api/chat", json=payload) as response:
+                    response.raise_for_status()
+                    content_length = response.headers.get("content-length")
+                    if (
+                        content_length is not None
+                        and int(content_length) > self.config.max_response_bytes
+                    ):
                         raise ModelPolicyError("response_too_large")
-                    buffer.extend(chunk)
-                raw = bytes(buffer)
-        except ModelPolicyError:
-            raise
-        except (httpx.HTTPError, ValueError) as exc:
-            raise ModelPolicyError("transport_failure") from exc
+                    buffer = bytearray()
+                    for chunk in response.iter_bytes():
+                        if len(buffer) + len(chunk) > self.config.max_response_bytes:
+                            raise ModelPolicyError("response_too_large")
+                        buffer.extend(chunk)
+                    raw = bytes(buffer)
+            except ModelPolicyError:
+                raise
+            except (httpx.HTTPError, ValueError) as exc:
+                raise ModelPolicyError("transport_failure") from exc
 
-        try:
-            envelope = _OllamaChatResponse.model_validate_json(raw)
-            if scan_content("model-policy-response.json", envelope.message.content.encode("utf-8")):
-                raise ModelPolicyError("private_output_rejected")
-            return ModelSourceProposal.model_validate_json(envelope.message.content)
-        except ModelPolicyError:
-            raise
-        except (ValidationError, ValueError, json.JSONDecodeError) as exc:
-            raise ModelPolicyError("invalid_structured_output") from exc
+            try:
+                envelope = _OllamaChatResponse.model_validate_json(raw)
+                if scan_content(
+                    "model-policy-response.json",
+                    envelope.message.content.encode("utf-8"),
+                ):
+                    raise ModelPolicyError("private_output_rejected")
+                return ModelSourceProposal.model_validate_json(envelope.message.content)
+            except ModelPolicyError:
+                raise
+            except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+                raise ModelPolicyError("invalid_structured_output") from exc
+        finally:
+            self._admission.release()
 
     def close(self) -> None:
         self._client.close()
@@ -220,6 +282,7 @@ class ControlledModelPolicy:
         *,
         allowed_sources: frozenset[EvidenceSource],
         fallback: HeuristicInvestigationPolicy | None = None,
+        metrics: OperationalMetrics | None = None,
     ) -> None:
         if not allowed_sources:
             raise ValueError("controlled model policy requires at least one allowed source")
@@ -227,6 +290,7 @@ class ControlledModelPolicy:
         self.audit = audit
         self.allowed_sources = allowed_sources
         self.fallback = fallback or HeuristicInvestigationPolicy()
+        self.metrics = metrics
 
     def decide(
         self,
@@ -237,6 +301,11 @@ class ControlledModelPolicy:
         deterministic = self._deterministic_decision(state)
         bound_trace = trace_id or "trace-policy-unbound"
         if deterministic.source is None:
+            self._record_model_policy(
+                outcome="deterministic",
+                reason_code="deterministic_terminal",
+                duration_seconds=None,
+            )
             self._audit(
                 trace_id=bound_trace,
                 resource=state.task.incident_id,
@@ -364,21 +433,66 @@ class ControlledModelPolicy:
             queried_sources=sorted(state.queried_sources, key=lambda item: item.value),
             evidence_counts={source: counts[source] for source in counts},
         )
+        started = time.perf_counter()
         try:
             proposed = self.proposer.propose(context)
             proposal = ModelSourceProposal.model_validate(proposed)
         except ModelPolicyError as exc:
+            self._record_model_policy(
+                outcome="fallback",
+                reason_code=exc.reason_code,
+                duration_seconds=time.perf_counter() - started,
+            )
             return None, exc.reason_code
         except ValidationError:
+            self._record_model_policy(
+                outcome="fallback",
+                reason_code="invalid_structured_output",
+                duration_seconds=time.perf_counter() - started,
+            )
             return None, "invalid_structured_output"
         except Exception:
+            self._record_model_policy(
+                outcome="fallback",
+                reason_code="unexpected_model_failure",
+                duration_seconds=time.perf_counter() - started,
+            )
             return None, "unexpected_model_failure"
         if proposal.source not in available_sources:
+            self._record_model_policy(
+                outcome="fallback",
+                reason_code="source_outside_guard",
+                duration_seconds=time.perf_counter() - started,
+            )
             return None, "source_outside_guard"
         proposal_bytes = proposal.model_dump_json().encode("utf-8")
         if scan_content("model-source-proposal.json", proposal_bytes):
+            self._record_model_policy(
+                outcome="fallback",
+                reason_code="private_output_rejected",
+                duration_seconds=time.perf_counter() - started,
+            )
             return None, "private_output_rejected"
+        self._record_model_policy(
+            outcome="accepted",
+            reason_code="proposal_accepted",
+            duration_seconds=time.perf_counter() - started,
+        )
         return proposal, "proposal_accepted"
+
+    def _record_model_policy(
+        self,
+        *,
+        outcome: str,
+        reason_code: str,
+        duration_seconds: float | None,
+    ) -> None:
+        if self.metrics is not None:
+            self.metrics.record_model_policy(
+                outcome=outcome,
+                reason_code=reason_code,
+                duration_seconds=duration_seconds,
+            )
 
     def _audit(
         self,

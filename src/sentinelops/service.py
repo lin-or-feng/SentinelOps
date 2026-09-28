@@ -204,6 +204,7 @@ def create_service(
             model_proposer,
             audit,
             allowed_sources=allowed_sources,
+            metrics=metrics,
         )
     else:
         policy = HeuristicInvestigationPolicy()
