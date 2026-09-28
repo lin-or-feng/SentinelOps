@@ -1,4 +1,4 @@
-# SentinelOps 0.4.3 架构
+# SentinelOps 0.4.4 架构
 
 ## 1. 设计目标与非目标
 
@@ -64,7 +64,7 @@ START
 | API 调用方 | 可选静态 Bearer、常量时间比较、精确 Host/CORS、请求体/RPM/并发边界、安全响应头 | OIDC、租户 RBAC、密钥轮换、TLS、跨副本租户配额与 DDoS 防护 |
 | 工具调用 | read-only 标志、来源白名单、Pydantic 参数、结果上限 | 每个真实提供方的最小权限凭据与 egress 控制 |
 | Agent 运行时 | 单 Agent 循环；可选 Supervisor/专项 Worker/Reviewer；共享查询/时间预算、按来源熔断 | 持久化异步任务、租户配额、强制取消与跨副本背压 |
-| 本地模型 | 默认关闭；loopback only、最小脱敏上下文、JSON Schema、禁代理/重定向、响应上限、单并发 + RPM、失败回退 | 独立策略评测集、模型/Prompt 版本治理、跨副本配额与 Token SLO |
+| 本地模型 | 默认关闭；loopback only、最小脱敏上下文、JSON Schema、禁代理/重定向、响应上限、单并发 + RPM、失败回退；60 条独立策略评测集 | 模型/Prompt 版本登记、组织真实事故集、跨副本配额与 Token SLO |
 | 持久化 | SQLite 参数化 SQL、事故 ID 幂等 | PostgreSQL 事务、租户行级安全、备份恢复 |
 | 审计 | 脱敏、前向哈希链、可选 HMAC | KMS 托管密钥、不可变外部归档、多副本串行化 |
 | 容器 | non-root、只读 rootfs、drop capabilities | 镜像签名、SBOM、漏洞扫描、网络策略 |
@@ -89,6 +89,8 @@ Multi 模式中的消息是 `InvestigatorAssignment -> InvestigatorFinding -> Ev
 
 模型适配器不实现 Agent 自治，只实现 `SourceProposer`。Single 模式每次 QUERY 前可采纳一个来源；Multi 模式最多用它调整第一优先来源，其余顺序仍来自启发式策略。查询关键词、查询窗口和 Provider 查询语言保持确定性。审计只存接受/回退结果与固定原因码，不保存 Prompt、响应或异常正文。完整说明见 [受控模型策略](CONTROLLED_MODEL_POLICY.md)。
 
+0.4.4 增加独立策略评测路径：`PolicyEvalSuite -> 隐私/Schema 门禁 -> heuristic 与 candidate 对照 -> 来源准确率/安全率/越权执行率 -> 4 条下游事故非回归`。回放模式使用批准的结构化响应验证控制面并进入 CI；真实 Ollama 模式才衡量指定模型效果。两种结果通过 `evaluation_type` 强制区分，避免把回放 100% 写成模型 100%。
+
 ## 8. 演进路线
 
 - Prometheus/Loki/Tempo 已通过统一 `EvidenceTool` 接入，并由脱敏回放集验证 Schema 与错误分类；下一步扩展未知字段、超时和冲突证据样本；
@@ -96,4 +98,4 @@ Multi 模式中的消息是 `InvestigatorAssignment -> InvestigatorFinding -> Ev
 - 同步请求 -> 持久化任务队列，支持取消、重试、死信和背压；
 - 静态 Bearer -> OIDC/OAuth2 + RBAC；
 - 本地日志 -> OpenTelemetry traces/metrics/logs 和独立审计归档；
-- 受控来源建议 -> 独立策略评测集与模型/Prompt 版本登记，在收益门槛达标前保持默认关闭。
+- 受控来源建议已有 60 条独立策略评测集；下一步登记模型/Prompt 哈希并接入组织真实事故集，在严格准入门槛达标前保持默认关闭。

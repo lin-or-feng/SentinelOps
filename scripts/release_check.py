@@ -42,6 +42,19 @@ def main() -> int:
     )
     run("-m", "sentinelops", "baseline", "--min-top1", "1.0")
     run("-m", "sentinelops", "orchestration-eval", "--min-top1", "1.0")
+    run(
+        "-m",
+        "sentinelops",
+        "policy-eval",
+        "--mode",
+        "replay",
+        "--min-top1",
+        "1.0",
+        "--min-safety",
+        "1.0",
+        "--max-forbidden-rate",
+        "0",
+    )
     print("\nSentinelOps release gate passed.")
     return 0
 

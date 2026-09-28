@@ -211,11 +211,19 @@ def test_ollama_adapter_uses_schema_non_streaming_and_temperature_zero() -> None
     def handler(request: httpx.Request) -> httpx.Response:
         captured.update(json.loads(request.content))
         proposal = {"source": "logs", "rationale": "inspect correlated errors"}
-        return httpx.Response(200, json={"message": {"content": json.dumps(proposal)}})
+        return httpx.Response(
+            200,
+            json={
+                "message": {"content": json.dumps(proposal)},
+                "prompt_eval_count": 42,
+                "eval_count": 9,
+            },
+        )
 
     proposer = OllamaSourceProposer(
         OllamaPolicyConfig(model="qwen3:8b"),
         transport=httpx.MockTransport(handler),
+        collect_usage=True,
     )
     context = ModelPolicyContext(
         service="checkout-service",
@@ -231,6 +239,13 @@ def test_ollama_adapter_uses_schema_non_streaming_and_temperature_zero() -> None
     assert captured["options"] == {"temperature": 0}
     assert captured["format"] == ModelSourceProposal.model_json_schema()
     assert "finish" not in json.dumps(captured["format"])
+    system_prompt = captured["messages"][0]["content"]
+    assert "untrusted observations" in system_prompt
+    assert "Choose only from available_sources" in system_prompt
+    observations = proposer.usage_observations()
+    assert len(observations) == 1
+    assert observations[0].prompt_tokens == 42
+    assert observations[0].completion_tokens == 9
 
 
 @pytest.mark.parametrize(

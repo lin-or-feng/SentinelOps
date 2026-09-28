@@ -15,6 +15,11 @@ from sentinelops.application import (
     load_replay_suite,
     run_replay_suite,
 )
+from sentinelops.application.policy_eval import (
+    PolicyEvalDatasetError,
+    evaluate_policy_suite,
+    load_policy_eval_suite,
+)
 from sentinelops.audit import AuditLog
 from sentinelops.domain import IncidentStatus
 from sentinelops.service import create_service
@@ -22,6 +27,7 @@ from sentinelops.service import create_service
 
 DEFAULT_DATASET = Path("evals/incidents.json")
 DEFAULT_REPLAY_DATASET = Path("evals/observability_replays.json")
+DEFAULT_POLICY_DATASET = Path("evals/policy_cases.json")
 DEFAULT_DB = Path(".sentinelops/sentinelops.db")
 
 
@@ -46,6 +52,19 @@ def build_parser() -> argparse.ArgumentParser:
     orchestration_eval.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     orchestration_eval.add_argument("--min-top1", type=float, default=1.0)
     orchestration_eval.add_argument("--provider-delay-ms", type=float, default=25.0)
+
+    policy_eval = subparsers.add_parser(
+        "policy-eval",
+        help="compare heuristic and controlled source-selection policies",
+    )
+    policy_eval.add_argument("--dataset", type=Path, default=DEFAULT_POLICY_DATASET)
+    policy_eval.add_argument("--incident-dataset", type=Path, default=DEFAULT_DATASET)
+    policy_eval.add_argument("--mode", choices=("replay", "ollama"), default="replay")
+    policy_eval.add_argument("--max-cases", type=int, default=None)
+    policy_eval.add_argument("--min-top1", type=float, default=1.0)
+    policy_eval.add_argument("--min-safety", type=float, default=1.0)
+    policy_eval.add_argument("--max-forbidden-rate", type=float, default=0.0)
+    policy_eval.add_argument("--skip-downstream", action="store_true")
 
     investigate = subparsers.add_parser("investigate", help="run one bounded investigation")
     investigate.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
@@ -123,6 +142,45 @@ def main(argv: list[str] | None = None) -> int:
             for item in (single, multi, auto)
         )
         return 0 if valid else 1
+
+    if args.command == "policy-eval":
+        proposer = None
+        try:
+            suite = load_policy_eval_suite(args.dataset)
+            fixture_cases = (
+                None if args.skip_downstream else load_fixture_cases(args.incident_dataset)
+            )
+            if args.mode == "ollama":
+                from sentinelops.model_policy import (
+                    OllamaSourceProposer,
+                    ollama_policy_config_from_env,
+                )
+
+                proposer = OllamaSourceProposer(
+                    ollama_policy_config_from_env(),
+                    collect_usage=True,
+                )
+            summary = evaluate_policy_suite(
+                suite,
+                mode=args.mode,
+                proposer=proposer,
+                fixture_cases=fixture_cases,
+                max_cases=args.max_cases,
+                min_top1=args.min_top1,
+                min_safety=args.min_safety,
+                max_forbidden_rate=args.max_forbidden_rate,
+            )
+        except (PolicyEvalDatasetError, ValueError) as exc:
+            print(json.dumps({"valid": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+            return 2
+        finally:
+            closer = getattr(proposer, "close", None)
+            if callable(closer):
+                closer()
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        gates = summary["gates"]
+        assert isinstance(gates, dict)
+        return 0 if bool(gates["passed"]) else 1
 
     if args.command == "serve":
         if not _is_loopback_host(args.host) and not os.getenv("SENTINELOPS_API_TOKEN"):

@@ -1,10 +1,10 @@
-# SentinelOps 0.4.3
+# SentinelOps 0.4.4
 
 SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围绕真实生产约束设计：Agent 只能查询指标、日志、链路和变更记录；每次调查受步骤、查询次数和截止时间限制；结论必须引用证据；证据不足时升级人工，而不是编造根因。
 
 当前版本提供**可复现的单 Agent 基线 + 可选有界多 Agent 协作 + 成本感知自动路由 + 受控本地模型策略**，不是生产事故平台。默认使用 Fixture 与确定性策略做离线评测，不访问外部系统；显式启用 observability 模式后，可通过同一领域契约连接 Prometheus、Loki、Tempo 的只读 API。
 
-## 0.4.3 已完成能力
+## 0.4.4 已完成能力
 
 - **调查编排**：`观察 -> 选择只读数据源 -> 查询 -> 更新证据 -> 诊断/升级人工`；
 - **有界执行**：限制最大步骤、查询次数、截止时间和重复动作；
@@ -26,6 +26,7 @@ SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围�
 - **自适应编排**：`auto` 根据查询预算、截止时间、多条跨域症状决定 single/multi；简单事故优先低成本单 Agent，选择理由进入关联审计链。
 - **受控模型策略**：可选 loopback Ollama 只建议下一只读数据源；JSON Schema、响应上限、输出隐私扫描、来源白名单和固定原因码审计形成控制面，失败无条件回退确定性策略。
 - **模型资源保护**：Ollama 默认单并发槽位与 30 RPM 进程内滑动窗口；繁忙或超限时不排队，立即回退启发式策略，并输出固定低基数的接受率、回退原因和调用耗时指标。
+- **策略评测门禁**：60 条版本化用例比较启发式与受控模型来源选择，覆盖中英文变体、Prompt 注入、非法来源和故障回退；回放控制面门禁进入 CI，真实 Ollama 结果单独标注且不影响离线复现。
 
 ## 架构速览
 
@@ -95,6 +96,24 @@ $env:SENTINELOPS_OLLAMA_RATE_LIMIT_RPM = "30"
 ```
 
 模型只返回 `{source, rationale}`，无权生成 PromQL/LogQL/TraceQL，无权决定 `finish`、`escalate`、预算、权限或写操作。发送上下文只含脱敏后的服务/症状、允许/已查询来源和各来源证据数量，不含 tenant、incident ID、Evidence 摘要、原始引用或凭据。非法 JSON、超时、非白名单/重复来源、隐私命中、繁忙、频率超限和超限响应均记录固定原因码并回退规则策略。详细边界见 [受控模型策略](docs/CONTROLLED_MODEL_POLICY.md)。
+
+策略变更先跑无网络回放门禁；要评估具体本地模型，再显式运行真实模式：
+
+```powershell
+# CI/发布门禁：只验证评测控制面、回退和安全契约，不代表模型效果
+.\.venv\Scripts\python.exe -m sentinelops policy-eval --mode replay `
+  --min-top1 1 --min-safety 1 --max-forbidden-rate 0
+
+# 本机真实模型：结果只对当前模型、Prompt、数据集和硬件负责
+$env:SENTINELOPS_OLLAMA_MODEL = "qwen2.5:7b"
+$env:SENTINELOPS_OLLAMA_TIMEOUT_SECONDS = "30"
+$env:SENTINELOPS_OLLAMA_MAX_INFLIGHT = "1"
+$env:SENTINELOPS_OLLAMA_RATE_LIMIT_RPM = "100"
+.\.venv\Scripts\python.exe -m sentinelops policy-eval --mode ollama `
+  --min-top1 1 --min-safety 1 --max-forbidden-rate 0
+```
+
+本机 `qwen2.5:7b` 的 60 条实测 Top-1 为 85%，高于启发式 66.67%，但没有达到 100% 准入阈值，因此 `ollama` 仍保持实验开关、默认禁用。数据集、指标解释和复现实录见 [策略评测](docs/POLICY_EVALUATION.md)。
 
 启动后可访问：
 
@@ -213,7 +232,7 @@ $env:SENTINELOPS_OBSERVABILITY_TENANT = "租户标识"
 .\.venv\Scripts\python.exe scripts\release_check.py
 ```
 
-门禁会执行编译检查、隐私/危险调用扫描、全量 pytest、80% 覆盖率门槛、Provider 回放门禁、4 个标注事故的确定性基线，以及 single/multi/auto 编排消融。最近一次实测记录见 [测试结果](docs/TEST_RESULTS.md)。
+门禁会执行编译检查、隐私/危险调用扫描、全量 pytest、80% 覆盖率门槛、Provider 回放门禁、4 个标注事故的确定性基线、single/multi/auto 编排消融，以及 60 条策略控制面回放。最近一次实测记录见 [测试结果](docs/TEST_RESULTS.md)。
 
 ## 隐私内容自动阻断
 
@@ -265,7 +284,8 @@ git config --local user.email "lin-or-feng@users.noreply.github.com"
 10. **0.4.1 自适应编排**：成本感知 single/multi 路由、路由原因审计与 auto 消融（完成）。
 11. **0.4.2 受控模型策略**：loopback Ollama 只生成结构化数据源建议；确定性结束/升级门控、最小上下文、失败回退和固定原因码审计（完成）。
 12. **0.4.3 模型资源保护**：单卡非阻塞并发准入、滑动窗口 RPM、回退原因与调用耗时指标（完成）。
-13. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO 执行、备份恢复和人工审批。
+13. **0.4.4 策略评测门禁**：版本化 60 条来源选择集、启发式/模型对照、安全回退、Token/时延统计和真实 Ollama 准入判定（完成；当前 7B 未过严格阈值）。
+14. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO 执行、备份恢复和人工审批。
 
 多 Agent 当前作为可选模式保留：只有当真实 Provider 压测证明时延收益高于额外查询成本，才应在部署中改为默认。模型策略同样必须通过固定评测和回退测试后才能进入默认路径。
 

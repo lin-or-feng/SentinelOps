@@ -1,4 +1,4 @@
-# SentinelOps 0.4.3 测试结果
+# SentinelOps 0.4.4 测试结果
 
 - 日期：2026-09-28
 - Python：3.11.9
@@ -17,9 +17,10 @@
 | `compileall` 源码、测试与脚本 | 通过 |
 | 工作树候选文件隐私扫描（含未跟踪、未忽略文件） | 通过 |
 | 危险运行时调用与已知密钥格式扫描 | 通过 |
-| pytest | 106 passed |
-| `sentinelops` 行覆盖率 | 91.37%（门槛 80%） |
+| pytest | 115 passed |
+| `sentinelops` 行覆盖率 | 91.27%（门槛 80%） |
 | Provider 回放门禁 | 5/5 通过，Schema 漂移 0 |
+| 策略控制面回放 | 60/60 来源正确，12/12 安全样本通过，越权执行 0 |
 | 离线基线 | 4/4 Top-1 正确 |
 | 证据引用有效性 | 100% |
 | 基线平均查询数 | 4.0 |
@@ -34,7 +35,7 @@
 
 | 项目 | 结果 |
 |---|---|
-| `GET /healthz` | 200，当前代码版本 0.4.3 |
+| `GET /healthz` | 200，当前代码版本 0.4.4 |
 | `GET /readyz` | SQLite 可用时 200，不可用时 503；不查询外部 Provider |
 | `POST /v1/investigations` | 201，诊断 `deployment_regression` |
 | 证据引用 | changes + logs 两个独立来源 |
@@ -101,7 +102,7 @@
 
 因此本次只确认 Docker/Compose 配置可解析，不能宣称镜像已构建或容器健康检查已通过。网络恢复后应重新运行 `docker compose up --build -d` 与 `/readyz` 检查。
 
-## 受控模型策略结果
+## 受控模型策略与评测结果
 
 - `ModelSourceProposal` 仅允许 `source + rationale`，Schema 不包含 finish/escalate；
 - MockTransport 验证 `/api/chat` 请求使用 JSON Schema、`stream=false`、`temperature=0`；
@@ -109,6 +110,22 @@
 - 非白名单/已查询来源不会执行，确定性 FINISH/ESCALATE 不调用模型；
 - 模型原始 rationale 与隐私命中值均未进入 Trace 或审计；
 - Service 端到端验证受控建议可改变首个来源，但查询预算、Gateway 和双来源诊断门控保持有效；
-- 以上均为无网络控制面测试；尚未声称真实模型提升诊断准确率。
 - 单并发槽测试确认第二个并发调用不排队并返回 `model_busy`；1 RPM 测试确认窗口内拒绝、61 秒后恢复；
 - 指标测试确认 accepted/fallback、固定原因码和模型调用耗时可观测，未知标签值归一化为安全枚举。
+
+60 条版本化策略集的发布门禁结果：
+
+- `control_plane_replay`：启发式 Top-1/Top-2 为 66.67%/83.33%，批准回放为 100%/100%；
+- 12 条安全样本全部执行预期只读来源，预置非法/故障响应 12/12 触发回退，越权执行为 0；
+- 4 条下游事故的启发式与回放策略均为 4/4 正确，平均查询均为 2.5；
+- 回放结果只证明控制面，不代表模型效果。
+
+本机 Ollama 0.34.1 + `qwen2.5:7b` 的真实运行结果：
+
+- 60 条 Top-1/Top-2 为 85%/96.67%，较启发式增加 18.33/13.34 个百分点；
+- 安全样本最终只执行允许且符合预期的只读来源，安全率 100%，越权执行为 0；
+- 4 条下游事故仍为 4/4 正确、平均查询 2.5；
+- 共 70 次成功结构化调用，Prompt 12,884 tokens、Completion 3,434 tokens，模型调用 P95 为 1.64 秒；
+- 因 Top-1 未达到严格的 100% 准入阈值，门禁判定失败，默认策略继续保持 `heuristic`。
+
+完整数据集边界、指标语义和命令见 [策略评测](POLICY_EVALUATION.md)。

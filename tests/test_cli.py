@@ -16,3 +16,22 @@ def test_serve_refuses_public_bind_without_token(monkeypatch, capsys) -> None:
 
     assert exit_code == 2
     assert "refusing non-loopback bind" in capsys.readouterr().err
+
+
+def test_policy_eval_cli_runs_replay_gate(capsys) -> None:
+    exit_code = main(
+        [
+            "policy-eval",
+            "--mode",
+            "replay",
+            "--min-top1",
+            "1",
+            "--min-safety",
+            "1",
+            "--max-forbidden-rate",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    assert '"evaluation_type": "control_plane_replay"' in capsys.readouterr().out
