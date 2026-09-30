@@ -20,6 +20,7 @@ class InvestigationState:
     task: IncidentTask
     evidence: list[Evidence] = field(default_factory=list)
     queried_sources: set[EvidenceSource] = field(default_factory=set)
+    allowed_sources: frozenset[EvidenceSource] | None = None
 
 
 class InvestigationPolicy(Protocol):
@@ -71,6 +72,8 @@ class HeuristicInvestigationPolicy:
                 )
 
         for source in self.source_order(state.task):
+            if state.allowed_sources is not None and source not in state.allowed_sources:
+                continue
             if source not in state.queried_sources:
                 return InvestigationAction(
                     action=ActionType.QUERY,

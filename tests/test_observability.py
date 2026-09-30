@@ -9,7 +9,9 @@ from sentinelops.adapters.observability import (
     ObservabilityEvidenceTool,
     PrometheusEvidenceProvider,
     ProviderEndpoint,
+    ProviderAuthorizationError,
     ProviderPayloadError,
+    ProviderRateLimitError,
     ResponseTooLarge,
     TempoEvidenceProvider,
     observability_tool_from_env,
@@ -99,6 +101,36 @@ def test_prometheus_uses_bounded_template_and_normalizes_evidence() -> None:
     assert evidence[0].source == EvidenceSource.METRICS
     assert evidence[0].attributes == {"metric": "db_waiting", "value": "84"}
     assert "test-provider-token" not in evidence[0].model_dump_json()
+
+
+def test_provider_timeout_is_sanitized_and_investigation_degrades(tmp_path) -> None:
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("private upstream response", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(timeout))
+    tool = ObservabilityEvidenceTool([
+        PrometheusEvidenceProvider(endpoint("prometheus.internal"), client=client)
+    ])
+    task = IncidentTask(
+        incident_id="inc-provider-timeout",
+        tenant_id="demo",
+        service="order-service",
+        started_at=START,
+        symptoms=["request error rate increased"],
+    )
+    service = create_service(db_path=tmp_path / "timeout.db", evidence_tool=tool)
+    result = service.investigate(task)
+
+    assert result.report.status == IncidentStatus.NEEDS_HUMAN
+    assert service.store.get(task.incident_id) == result
+    assert service.run_journal.get(task.incident_id)[2] == "completed"
+    assert service.audit.verify().valid
+    events = service.audit.list_events(trace_id=result.trace_id)
+    assert any(
+        event["action"] == "tool_query" and event["status"] == "error"
+        for event in events
+    )
+    assert "private upstream response" not in str(events)
 
 
 def test_loki_redacts_private_log_content_and_bounds_results() -> None:
@@ -198,6 +230,27 @@ def test_provider_rejects_redirect_and_large_response() -> None:
     )
     with pytest.raises(ConnectionError, match="retryable HTTP 503"):
         unavailable.query(spec(EvidenceSource.METRICS))
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (401, ProviderAuthorizationError),
+        (403, ProviderAuthorizationError),
+        (408, TimeoutError),
+        (429, ProviderRateLimitError),
+    ],
+)
+def test_provider_rejection_exposes_no_response_body(status, error_type) -> None:
+    provider = PrometheusEvidenceProvider(
+        endpoint("prometheus.internal"),
+        client=httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(status, text="private upstream body")
+        )),
+    )
+    with pytest.raises(error_type) as exc:
+        provider.query(spec(EvidenceSource.METRICS))
+    assert "private upstream body" not in str(exc.value)
 
 
 def test_observability_tool_routes_only_configured_sources() -> None:

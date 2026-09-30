@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,12 +31,19 @@ from sentinelops.multi_agent import (
 from sentinelops.model_policy import (
     ControlledModelPolicy,
     OllamaSourceProposer,
+    SOURCE_SELECTION_PROMPT_ID,
     SourceProposer,
     ollama_policy_config_from_env,
 )
 from sentinelops.policy import HeuristicInvestigationPolicy, InvestigationPolicy
 from sentinelops.ports import EvidenceTool
-from sentinelops.storage import InvestigationStore
+from sentinelops.specialist_shadow import (
+    HypothesisProposer,
+    OllamaHypothesisProposer,
+    ShadowJournal,
+    ShadowSpecialist,
+)
+from sentinelops.storage import InvestigationRunJournal, InvestigationStore, RunReservationError
 from sentinelops.telemetry import OperationalMetrics, current_request_id
 
 
@@ -47,10 +55,12 @@ class IncidentConflict(ValueError):
 class SentinelOpsService:
     agent: BoundedInvestigationAgent | BoundedMultiAgentSupervisor | AdaptiveInvestigationAgent
     store: InvestigationStore
+    run_journal: InvestigationRunJournal
     audit: AuditLog
     evidence_tool: EvidenceTool
     metrics: OperationalMetrics
     policy_resource: object | None = None
+    shadow_resource: object | None = None
 
     def investigate(self, task: IncidentTask) -> InvestigationResult:
         started = time.perf_counter()
@@ -58,6 +68,7 @@ class SentinelOpsService:
         existing = self.store.get(task.incident_id)
         if existing is not None:
             if existing.task == task:
+                self.run_journal.reconcile_completed(existing)
                 replay_details: dict[str, object] = {"result_reused": True}
                 if request_id is not None:
                     replay_details["request_id"] = request_id
@@ -92,14 +103,36 @@ class SentinelOpsService:
                 duration_seconds=time.perf_counter() - started,
             )
             raise IncidentConflict("incident_id already exists with a different task payload")
+        trace_id = f"trace-{uuid.uuid4().hex}"
         try:
-            result = self.agent.run(task, request_id=request_id)
+            self.run_journal.reserve(task, trace_id)
+        except RunReservationError as exc:
+            reserved = self.run_journal.get(task.incident_id)
+            self.audit.append(
+                trace_id=reserved[0] if reserved is not None else trace_id,
+                actor="sentinelops-service",
+                action="run_reservation_conflict",
+                resource=task.incident_id,
+                status="denied",
+                details={"reason": "incident_run_already_reserved"},
+            )
+            self.metrics.record_investigation(
+                outcome="conflict",
+                duration_seconds=time.perf_counter() - started,
+            )
+            raise IncidentConflict(
+                "incident investigation already reserved; operator review required"
+            ) from exc
+        try:
+            result = self.agent.run(task, request_id=request_id, trace_id=trace_id)
         except Exception:
+            self.run_journal.finish(task.incident_id, trace_id, success=False)
             self.metrics.record_investigation(
                 outcome="error",
                 duration_seconds=time.perf_counter() - started,
             )
             raise
+        self.run_journal.finish(task.incident_id, trace_id, success=True)
         self.metrics.record_investigation(
             outcome=result.report.status.value,
             duration_seconds=time.perf_counter() - started,
@@ -117,8 +150,13 @@ class SentinelOpsService:
                 closer()
         finally:
             policy_closer = getattr(self.policy_resource, "close", None)
-            if callable(policy_closer):
-                policy_closer()
+            try:
+                if callable(policy_closer):
+                    policy_closer()
+            finally:
+                shadow_closer = getattr(self.shadow_resource, "close", None)
+                if callable(shadow_closer):
+                    shadow_closer()
 
 
 def create_service(
@@ -133,6 +171,8 @@ def create_service(
     multi_agent_config: MultiAgentConfig | None = None,
     policy_mode: str | None = None,
     model_proposer: SourceProposer | None = None,
+    shadow_mode: str | None = None,
+    shadow_proposer: HypothesisProposer | None = None,
 ) -> SentinelOpsService:
     requested_mode = orchestration_mode or os.getenv("SENTINELOPS_ORCHESTRATION_MODE") or "single"
     try:
@@ -144,6 +184,16 @@ def create_service(
     except ValueError as exc:
         raise ValueError("orchestration_mode must be 'single', 'multi', or 'auto'") from exc
 
+    resolved_shadow_mode = (
+        shadow_mode or os.getenv("SENTINELOPS_SPECIALIST_SHADOW") or "off"
+    ).casefold()
+    if resolved_shadow_mode not in {"off", "ollama"}:
+        raise ValueError("shadow_mode must be 'off' or 'ollama'")
+    if shadow_proposer is not None and resolved_shadow_mode != "ollama":
+        raise ValueError("shadow_proposer requires shadow_mode='ollama'")
+    if resolved_shadow_mode == "ollama" and resolved_mode == OrchestrationMode.SINGLE:
+        raise ValueError("specialist shadow requires multi or auto orchestration")
+
     resolved_policy_mode = (
         policy_mode or os.getenv("SENTINELOPS_POLICY_MODE") or "heuristic"
     ).casefold()
@@ -154,6 +204,8 @@ def create_service(
     ollama_config = None
     if resolved_policy_mode == "ollama" and model_proposer is None:
         ollama_config = ollama_policy_config_from_env()
+        if ollama_config.prompt_id != SOURCE_SELECTION_PROMPT_ID:
+            raise ValueError("experimental source-selection prompts are evaluation-only")
 
     mode = (evidence_mode or os.getenv("SENTINELOPS_EVIDENCE_MODE") or "fixture").casefold()
     if evidence_tool is not None:
@@ -184,6 +236,7 @@ def create_service(
         raise ValueError("at least one evidence source must be allowed")
     audit = AuditLog(db_path, key=audit_key)
     store = InvestigationStore(db_path)
+    run_journal = InvestigationRunJournal(db_path)
     metrics = OperationalMetrics(version=__version__)
     gateway = EvidenceGateway(
         tool,
@@ -208,7 +261,16 @@ def create_service(
         )
     else:
         policy = HeuristicInvestigationPolicy()
-    single_agent = BoundedInvestigationAgent(gateway, audit, store, policy=policy)
+    single_agent = BoundedInvestigationAgent(
+        gateway, audit, store, policy=policy, allowed_sources=allowed_sources
+    )
+    shadow_resource: object | None = None
+    shadow: ShadowSpecialist | None = None
+    if resolved_shadow_mode == "ollama":
+        if shadow_proposer is None:
+            shadow_proposer = OllamaHypothesisProposer(ollama_policy_config_from_env())
+            shadow_resource = shadow_proposer
+        shadow = ShadowSpecialist(shadow_proposer, audit, ShadowJournal(db_path))
     agent: BoundedInvestigationAgent | BoundedMultiAgentSupervisor | AdaptiveInvestigationAgent
     if resolved_mode in {OrchestrationMode.MULTI, OrchestrationMode.AUTO}:
         multi_agent = BoundedMultiAgentSupervisor(
@@ -218,6 +280,7 @@ def create_service(
             allowed_sources=allowed_sources,
             config=multi_agent_config,
             policy=policy,
+            shadow=shadow,
         )
         if resolved_mode == OrchestrationMode.AUTO:
             agent = AdaptiveInvestigationAgent(single_agent, multi_agent, audit)
@@ -228,8 +291,10 @@ def create_service(
     return SentinelOpsService(
         agent=agent,
         store=store,
+        run_journal=run_journal,
         audit=audit,
         evidence_tool=tool,
         metrics=metrics,
         policy_resource=policy_resource,
+        shadow_resource=shadow_resource,
     )

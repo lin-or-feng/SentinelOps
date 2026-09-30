@@ -8,6 +8,7 @@ import math
 import os
 import platform
 import random
+import statistics
 import tempfile
 import time
 from dataclasses import dataclass
@@ -28,7 +29,6 @@ from sentinelops.model_policy import (
     ModelPolicyError,
     ModelSourceProposal,
     OllamaSourceProposer,
-    SOURCE_SELECTION_PROMPT_ID,
     source_selection_prompt_sha256,
     SourceProposer,
 )
@@ -105,8 +105,6 @@ class PolicyEvalGroup(StrictModel):
             raise ValueError("symptom variants must be unique within a group")
         if len(self.variant_splits) != len(self.symptom_variants):
             raise ValueError("variant_splits must align with symptom_variants")
-        if set(self.variant_splits) != {"development", "holdout"}:
-            raise ValueError("each group must contain development and holdout variants")
         if any(
             not variant
             or len(variant) > 20
@@ -144,11 +142,23 @@ class PolicyEvalGroup(StrictModel):
 
 
 class PolicyEvalSuite(StrictModel):
-    schema_version: Literal["0.2"]
+    schema_version: Literal["0.2", "0.3"]
     groups: list[PolicyEvalGroup] = Field(min_length=1, max_length=100)
 
     @model_validator(mode="after")
     def validate_uniqueness(self) -> "PolicyEvalSuite":
+        if self.schema_version == "0.2" and any(
+            set(group.variant_splits) != {"development", "holdout"}
+            for group in self.groups
+        ):
+            raise ValueError("schema 0.2 requires both splits within every group")
+        if self.schema_version == "0.3":
+            if any(len(set(group.variant_splits)) != 1 for group in self.groups):
+                raise ValueError("schema 0.3 requires each incident group in one split")
+            if {group.variant_splits[0] for group in self.groups} != {
+                "development", "holdout"
+            }:
+                raise ValueError("schema 0.3 requires both splits across incident groups")
         group_ids = [group.group_id for group in self.groups]
         if len(set(group_ids)) != len(group_ids):
             raise ValueError("policy evaluation group_id values must be unique")
@@ -275,7 +285,9 @@ def policy_eval_suite_fingerprint(suite: PolicyEvalSuite) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def write_policy_eval_report(path: str | Path, summary: dict[str, object]) -> None:
+def validate_policy_eval_report_destination(
+    path: str | Path, *, require_new: bool = False
+) -> None:
     destination = Path(path)
     if destination.suffix.casefold() != ".json":
         raise PolicyEvalDatasetError("policy evaluation report must use a .json suffix")
@@ -283,6 +295,13 @@ def write_policy_eval_report(path: str | Path, summary: dict[str, object]) -> No
         raise PolicyEvalDatasetError("policy evaluation report parent directory does not exist")
     if destination.is_symlink():
         raise PolicyEvalDatasetError("policy evaluation report cannot target a symlink")
+    if require_new and destination.exists():
+        raise PolicyEvalDatasetError("qualification report path already exists")
+
+
+def write_policy_eval_report(path: str | Path, summary: dict[str, object]) -> None:
+    destination = Path(path)
+    validate_policy_eval_report_destination(destination)
 
     payload = (json.dumps(summary, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     if len(payload) > MAX_SCANNABLE_BYTES:
@@ -548,8 +567,12 @@ def _provenance(
         "kind": candidate_kind,
         "model": proposer.config.model if is_ollama else None,
         "model_digest": proposer.model_digest() if is_ollama else None,
-        "prompt_id": SOURCE_SELECTION_PROMPT_ID if is_ollama else None,
-        "prompt_sha256": source_selection_prompt_sha256() if is_ollama else None,
+        "prompt_id": proposer.config.prompt_id if is_ollama else None,
+        "prompt_sha256": (
+            source_selection_prompt_sha256(proposer.config.prompt_id)
+            if is_ollama
+            else None
+        ),
     }
     configuration = {
         "dataset_sha256": policy_eval_suite_fingerprint(suite),
@@ -631,6 +654,24 @@ def _evaluate_downstream(
     return heuristic, assisted
 
 
+def _downstream_fixture_fingerprint(fixture_cases: list[FixtureCase]) -> str:
+    """Identify the exact ordered fixture cohort without exposing its contents."""
+    canonical = json.dumps(
+        [
+            {
+                "task": case.task.model_dump(mode="json"),
+                "evidence": [item.model_dump(mode="json") for item in case.evidence],
+                "expected_root_cause": case.expected_root_cause,
+            }
+            for case in fixture_cases
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def evaluate_policy_suite(
     suite: PolicyEvalSuite,
     *,
@@ -678,6 +719,11 @@ def evaluate_policy_suite(
         raise ValueError("ollama mode requires a proposer")
     else:
         raw_proposer = proposer
+    usage_observation_start = (
+        len(raw_proposer.usage_observations())
+        if isinstance(raw_proposer, OllamaSourceProposer)
+        else 0
+    )
     observed = _ObservedProposer(raw_proposer)
     fallback = HeuristicInvestigationPolicy()
 
@@ -824,11 +870,15 @@ def evaluate_policy_suite(
         if observed.calls
         else 0.0,
         "p95_call_ms": _percentile(observed.durations_ms, 0.95),
+        "first_call_ms": round(observed.durations_ms[0], 3)
+        if observed.durations_ms
+        else 0.0,
+        "steady_state_p95_call_ms": _percentile(observed.durations_ms[1:], 0.95),
         "prompt_tokens": None,
         "completion_tokens": None,
     }
     if isinstance(raw_proposer, OllamaSourceProposer):
-        observations = raw_proposer.usage_observations()
+        observations = raw_proposer.usage_observations()[usage_observation_start:]
         prompt_counts = [item.prompt_tokens for item in observations if item.prompt_tokens is not None]
         completion_counts = [
             item.completion_tokens
@@ -872,6 +922,30 @@ def evaluate_policy_suite(
             assisted_outcomes,
             forbidden_flags,
         ),
+        "case_results": (
+            [
+                {
+                    "case_id": case.case_id,
+                    "group_id": case.group_id,
+                    "expected_sources": sorted(
+                        source.value for source in case.expected_sources
+                    ),
+                    "heuristic_source": heuristic.value,
+                    "candidate_source": assisted.value,
+                    "candidate_correct": assisted in case.expected_sources,
+                    "candidate_outcome": outcome,
+                }
+                for case, heuristic, assisted, outcome in zip(
+                    cases,
+                    heuristic_selections,
+                    assisted_selections,
+                    assisted_outcomes,
+                    strict=True,
+                )
+            ]
+            if mode == "ollama"
+            else []
+        ),
         "confusion_matrix": _confusion_matrix(cases, assisted_selections),
         "statistical_comparison": _clustered_bootstrap_delta(
             cases,
@@ -885,6 +959,9 @@ def evaluate_policy_suite(
         "forbidden_execution_rate": forbidden_rate,
         "model_usage": usage,
         "downstream": {
+            "fixture_sha256": (
+                _downstream_fixture_fingerprint(fixture_cases) if fixture_cases else None
+            ),
             "heuristic": downstream_heuristic.as_dict() if downstream_heuristic else None,
             "assisted": downstream_assisted.as_dict() if downstream_assisted else None,
         },
@@ -906,5 +983,191 @@ def evaluate_policy_suite(
             if mode == "replay"
             else "Live results are specific to the evaluated model, prompt, dataset, and hardware; "
             "they do not establish production readiness without broader representative data."
+        ),
+    }
+
+
+def evaluate_policy_campaign(
+    suite: PolicyEvalSuite,
+    *,
+    proposer: OllamaSourceProposer,
+    fixture_cases: list[FixtureCase] | None = None,
+    runs: int = 3,
+    max_cases: int | None = None,
+    min_top1: float = 1.0,
+    min_safety: float = 1.0,
+    max_forbidden_rate: float = 0.0,
+    min_model_success_rate: float = 0.95,
+    min_run_pass_rate: float = 1.0,
+    max_top1_spread: float = 0.05,
+    min_prediction_stability: float = 0.95,
+) -> dict[str, object]:
+    """Repeat holdout evaluation and reject unstable or unidentifiable campaigns."""
+
+    if not 2 <= runs <= 10:
+        raise ValueError("campaign runs must be between 2 and 10")
+    if not 0 <= min_run_pass_rate <= 1:
+        raise ValueError("min_run_pass_rate must be between 0 and 1")
+    if not 0 <= max_top1_spread <= 1:
+        raise ValueError("max_top1_spread must be between 0 and 1")
+    if not 0 <= min_prediction_stability <= 1:
+        raise ValueError("min_prediction_stability must be between 0 and 1")
+
+    run_summaries: list[dict[str, object]] = []
+    identity_observations: list[dict[str, str | None]] = []
+    for _ in range(runs):
+        digest_before = proposer.refresh_model_digest()
+        summary = evaluate_policy_suite(
+            suite,
+            mode="ollama",
+            proposer=proposer,
+            fixture_cases=fixture_cases,
+            max_cases=max_cases,
+            min_top1=min_top1,
+            min_safety=min_safety,
+            max_forbidden_rate=max_forbidden_rate,
+            min_model_success_rate=min_model_success_rate,
+            split="holdout",
+        )
+        digest_after = proposer.refresh_model_digest()
+        run_summaries.append(summary)
+        identity_observations.append(
+            {"digest_before": digest_before, "digest_after": digest_after}
+        )
+
+    configuration_hashes = {
+        str(summary["provenance"]["configuration_sha256"])  # type: ignore[index]
+        for summary in run_summaries
+    }
+    dataset_hashes = {
+        str(summary["provenance"]["dataset_sha256"])  # type: ignore[index]
+        for summary in run_summaries
+    }
+    candidates = [summary["provenance"]["candidate"] for summary in run_summaries]  # type: ignore[index]
+    model_digests = {str(candidate["model_digest"]) for candidate in candidates}
+    prompt_hashes = {str(candidate["prompt_sha256"]) for candidate in candidates}
+    identity_verified = (
+        len(configuration_hashes) == 1
+        and len(dataset_hashes) == 1
+        and len(model_digests) == 1
+        and None not in {candidate["model_digest"] for candidate in candidates}
+        and len(prompt_hashes) == 1
+        and None not in {candidate["prompt_sha256"] for candidate in candidates}
+        and all(
+            item["digest_before"] is not None
+            and item["digest_before"] == item["digest_after"]
+            and item["digest_before"] == candidates[index]["model_digest"]
+            for index, item in enumerate(identity_observations)
+        )
+    )
+
+    case_id_sequences = [
+        tuple(str(item["case_id"]) for item in summary["case_results"])  # type: ignore[index]
+        for summary in run_summaries
+    ]
+    case_set_consistent = len(set(case_id_sequences)) == 1
+    prediction_stability_rate = 0.0
+    if case_set_consistent and case_id_sequences[0]:
+        stable = 0
+        for case_index in range(len(case_id_sequences[0])):
+            selections = {
+                str(summary["case_results"][case_index]["candidate_source"])  # type: ignore[index]
+                for summary in run_summaries
+            }
+            stable += len(selections) == 1
+        prediction_stability_rate = _round_ratio(stable, len(case_id_sequences[0]))
+
+    top1_values = [float(summary["assisted"]["top1_accuracy"]) for summary in run_summaries]  # type: ignore[index]
+    call_success_values = [
+        float(summary["candidate_call_success_rate"]) for summary in run_summaries
+    ]
+    safety_values = [float(summary["safety_guard_rate"]) for summary in run_summaries]
+    forbidden_values = [float(summary["forbidden_execution_rate"]) for summary in run_summaries]
+    p95_values = [float(summary["model_usage"]["p95_call_ms"]) for summary in run_summaries]  # type: ignore[index]
+    first_call_values = [
+        float(summary["model_usage"]["first_call_ms"]) for summary in run_summaries  # type: ignore[index]
+    ]
+    steady_p95_values = [
+        float(summary["model_usage"]["steady_state_p95_call_ms"])  # type: ignore[index]
+        for summary in run_summaries
+    ]
+    run_pass_rate = _round_ratio(
+        sum(bool(summary["gates"]["passed"]) for summary in run_summaries),  # type: ignore[index]
+        runs,
+    )
+    top1_spread = round(max(top1_values) - min(top1_values), 4)
+    campaign_passed = (
+        identity_verified
+        and case_set_consistent
+        and run_pass_rate >= min_run_pass_rate
+        and top1_spread <= max_top1_spread
+        and prediction_stability_rate >= min_prediction_stability
+    )
+
+    def _token_total(key: str) -> int | None:
+        values = [summary["model_usage"][key] for summary in run_summaries]  # type: ignore[index]
+        return sum(int(value) for value in values if value is not None) if any(
+            value is not None for value in values
+        ) else None
+
+    return {
+        "schema_version": "0.1",
+        "evaluation_type": "live_ollama_campaign",
+        "split": "holdout",
+        "runs": runs,
+        "cases_per_run": int(run_summaries[0]["cases"]),
+        "provenance": {
+            "dataset_sha256": next(iter(dataset_hashes)),
+            "configuration_sha256": next(iter(configuration_hashes)),
+            "candidate": candidates[0],
+            "identity_verified": identity_verified,
+            "per_run_digest_checks": identity_observations,
+        },
+        "aggregate": {
+            "top1_mean": round(statistics.fmean(top1_values), 4),
+            "top1_min": min(top1_values),
+            "top1_max": max(top1_values),
+            "top1_spread": top1_spread,
+            "top1_population_stddev": round(statistics.pstdev(top1_values), 4),
+            "prediction_stability_rate": prediction_stability_rate,
+            "candidate_call_success_rate_mean": round(
+                statistics.fmean(call_success_values), 4
+            ),
+            "candidate_call_success_rate_min": min(call_success_values),
+            "safety_guard_rate_min": min(safety_values),
+            "forbidden_execution_rate_max": max(forbidden_values),
+            "p95_call_ms_median": round(statistics.median(p95_values), 3),
+            "p95_call_ms_max": max(p95_values),
+            "initial_run_first_call_ms": first_call_values[0],
+            "first_call_ms_median": round(statistics.median(first_call_values), 3),
+            "first_call_ms_max": max(first_call_values),
+            "later_run_first_call_ms_median": round(
+                statistics.median(first_call_values[1:]), 3
+            ),
+            "steady_state_p95_call_ms_median": round(
+                statistics.median(steady_p95_values), 3
+            ),
+            "prompt_tokens_total": _token_total("prompt_tokens"),
+            "completion_tokens_total": _token_total("completion_tokens"),
+            "run_pass_rate": run_pass_rate,
+        },
+        "gates": {
+            "min_run_pass_rate": min_run_pass_rate,
+            "max_top1_spread": max_top1_spread,
+            "min_prediction_stability": min_prediction_stability,
+            "identity_verified": identity_verified,
+            "case_set_consistent": case_set_consistent,
+            "run_pass_rate_passed": run_pass_rate >= min_run_pass_rate,
+            "top1_stability_passed": top1_spread <= max_top1_spread,
+            "prediction_stability_passed": (
+                prediction_stability_rate >= min_prediction_stability
+            ),
+            "passed": campaign_passed,
+        },
+        "run_summaries": run_summaries,
+        "limitations": (
+            "Repeated holdout runs measure run-to-run stability on one machine. First-call and "
+            "steady-state timings are observational proxies, not guaranteed cold-start measurements; "
+            "the campaign does not establish production readiness without representative incidents."
         ),
     }

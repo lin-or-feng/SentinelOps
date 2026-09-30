@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from sentinelops.domain import DiagnosisReport, IncidentStatus, IncidentTask
+from sentinelops.domain import DiagnosisReport, EvidenceReview, IncidentStatus, IncidentTask
 
 
 def test_incident_task_rejects_unknown_fields() -> None:
@@ -35,4 +35,13 @@ def test_task_rejects_empty_symptoms() -> None:
             service="orders",
             started_at=datetime.now(timezone.utc),
             symptoms=[],
+        )
+
+
+def test_reviewer_reason_cannot_claim_support_while_escalating() -> None:
+    with pytest.raises(ValidationError):
+        EvidenceReview(
+            status=IncidentStatus.NEEDS_HUMAN,
+            reason_code="supported",
+            rationale="inconsistent review verdict",
         )

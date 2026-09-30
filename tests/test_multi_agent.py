@@ -1,4 +1,5 @@
 import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,8 +8,39 @@ from sentinelops.adapters import FixtureEvidenceTool, load_fixture_cases
 from sentinelops.application import compare_orchestration
 from sentinelops.api import create_app
 from sentinelops.domain import EvidenceSource, IncidentStatus, OrchestrationMode
-from sentinelops.multi_agent import OrchestrationRouter
+from sentinelops.multi_agent import EvidenceReviewer, OrchestrationRouter
+from sentinelops.policy import HeuristicInvestigationPolicy
 from sentinelops.service import create_service
+from sentinelops.storage import AssignmentJournal, AssignmentState, EvidenceJournal
+
+
+def test_multi_agent_deadline_drains_running_readers_before_completion(tmp_path) -> None:
+    case = load_fixture_cases("evals/incidents.json")[0]
+
+    class SlowReadOnlyTool:
+        read_only = True
+        name = "slow-read-only"
+
+        def query(self, spec):
+            time.sleep(1.2)
+            return []
+
+    service = create_service(
+        db_path=tmp_path / "slow.db",
+        orchestration_mode="multi",
+        evidence_tool=SlowReadOnlyTool(),
+    )
+    task = case.task.model_copy(update={"deadline_seconds": 1, "query_budget": 2})
+    result = service.investigate(task)
+
+    assert result.report.status == IncidentStatus.NEEDS_HUMAN
+    assert "deadline" in result.degraded_components
+    records = AssignmentJournal(service.store.db_path).list_for_trace(result.trace_id)
+    assert records
+    assert all(record.state == AssignmentState.EXPIRED for record in records)
+    events = service.audit.list_events(trace_id=result.trace_id)
+    assert events[0]["action"] == "investigation_completed"
+    assert service.audit.verify().valid
 
 
 def test_multi_agent_dispatches_specialists_reviews_and_audits(tmp_path) -> None:
@@ -31,6 +63,9 @@ def test_multi_agent_dispatches_specialists_reviews_and_audits(tmp_path) -> None
     }
     assert result.trace[-1].actor == "evidence-reviewer"
     assert service.audit.verify().valid is True
+    assignment_records = AssignmentJournal(tmp_path / "multi.db").list_for_trace(result.trace_id)
+    assert len(assignment_records) == 2
+    assert {record.state for record in assignment_records} == {AssignmentState.COMPLETED}
 
     events = service.audit.list_events(trace_id=result.trace_id, limit=100)
     actions = [event["action"] for event in events]
@@ -116,6 +151,8 @@ def test_multi_agent_isolates_one_worker_failure_and_uses_next_wave(tmp_path) ->
     )
     assert failed["status"] == "error"
     assert failed["details"]["error_type"] == "EvidenceToolError"
+    assignment_records = AssignmentJournal(tmp_path / "degraded.db").list_for_trace(result.trace_id)
+    assert [record.state for record in assignment_records].count(AssignmentState.FAILED) == 1
 
 
 def test_multi_agent_global_query_budget_is_shared_across_workers(tmp_path) -> None:
@@ -131,6 +168,171 @@ def test_multi_agent_global_query_budget_is_shared_across_workers(tmp_path) -> N
     assert result.report.status == IncidentStatus.NEEDS_HUMAN
     assert result.report.tool_queries == 1
     assert len([step for step in result.trace if step.action.value == "query"]) == 1
+
+
+def test_multi_agent_normalizes_duplicate_and_out_of_scope_source_plan(tmp_path) -> None:
+    case = load_fixture_cases("evals/incidents.json")[1]
+
+    class NoisyPlanPolicy(HeuristicInvestigationPolicy):
+        def source_order(self, task):
+            del task
+            return (
+                EvidenceSource.METRICS,
+                EvidenceSource.METRICS,
+                EvidenceSource.LOGS,
+                EvidenceSource.TRACES,
+            )
+
+        def plan_sources(self, task, *, allowed_sources, trace_id):
+            del task, allowed_sources, trace_id
+            return (
+                EvidenceSource.METRICS,
+                EvidenceSource.METRICS,
+                EvidenceSource.RUNBOOK,
+                EvidenceSource.LOGS,
+                EvidenceSource.LOGS,
+            )
+
+    service = create_service(
+        db_path=tmp_path / "noisy-plan.db",
+        evidence_tool=FixtureEvidenceTool(case.evidence),
+        orchestration_mode="multi",
+    )
+    service.agent.policy = NoisyPlanPolicy()
+
+    result = service.investigate(case.task.model_copy(update={"query_budget": 2}))
+
+    assert result.report.status == IncidentStatus.DIAGNOSED
+    assert result.report.tool_queries == 2
+    assert [step.source for step in result.trace[:-1]] == [
+        EvidenceSource.METRICS, EvidenceSource.LOGS
+    ]
+    events = service.audit.list_events(trace_id=result.trace_id, limit=100)
+    normalized = next(event for event in events if event["action"] == "source_plan_normalized")
+    assert normalized["details"] == {
+        "duplicates_removed": 2,
+        "out_of_scope_removed": 1,
+        "fallback_sources_added": 1,
+        "effective_sources": ["metrics", "logs"],
+    }
+
+
+def test_reviewer_refuses_two_equally_supported_root_causes() -> None:
+    case = load_fixture_cases("evals/incidents.json")[1]
+    evidence = [
+        item.model_copy(
+            update={
+                "summary": "connection pool and cache miss signals rose together",
+                "attributes": {},
+            }
+        )
+        for item in case.evidence[:2]
+    ]
+
+    review = EvidenceReviewer().review(evidence)
+
+    assert review.status == IncidentStatus.NEEDS_HUMAN
+    assert review.reason_code == "competing_candidates"
+    assert review.selected_code is None
+    assert {item.code for item in review.candidates[:2]} == {
+        "database_pool_exhaustion", "cache_miss_storm"
+    }
+    assert "competing" in review.rationale
+    with pytest.raises(ValueError, match="min_candidate_margin"):
+        EvidenceReviewer(min_candidate_margin=-0.1)
+
+
+def test_reviewer_rejects_reused_evidence_id_with_different_content() -> None:
+    case = load_fixture_cases("evals/incidents.json")[1]
+    metric, log = case.evidence[:2]
+    conflicting_log = log.model_copy(update={"evidence_id": metric.evidence_id})
+
+    review = EvidenceReviewer().review([metric, conflicting_log])
+
+    assert review.status == IncidentStatus.NEEDS_HUMAN
+    assert review.reason_code == "evidence_identity_conflict"
+    assert review.candidates == []
+    assert review.evidence_ids == []
+    assert EvidenceReviewer().review([metric, metric, log]).reason_code == "supported"
+
+
+def test_multi_agent_stops_after_evidence_identity_conflict(tmp_path) -> None:
+    case = load_fixture_cases("evals/incidents.json")[1]
+    metric, log, trace = case.evidence
+    tool = FixtureEvidenceTool(
+        [metric, log.model_copy(update={"evidence_id": metric.evidence_id}), trace]
+    )
+    service = create_service(
+        db_path=tmp_path / "identity-conflict.db",
+        evidence_tool=tool,
+        orchestration_mode="multi",
+    )
+
+    result = service.investigate(case.task)
+
+    assert result.report.status == IncidentStatus.NEEDS_HUMAN
+    assert result.report.selected_code is None
+    assert result.report.tool_queries == 2
+    assert "evidence_integrity" in result.degraded_components
+    assert "conflicting contents" in result.report.unresolved_questions[0]
+    reviews = [
+        event for event in service.audit.list_events(trace_id=result.trace_id, limit=100)
+        if event["action"] == "evidence_reviewed"
+    ]
+    assert len(reviews) == 1
+    assert reviews[0]["details"]["reason_code"] == "evidence_identity_conflict"
+    assert not any(step.actor == "traces-investigator" for step in result.trace)
+    assert EvidenceJournal(service.store.db_path).list_for_trace(result.trace_id) == []
+
+
+def test_multi_agent_uses_next_wave_to_resolve_competing_findings(tmp_path) -> None:
+    case = load_fixture_cases("evals/incidents.json")[1]
+    evidence = [
+        item.model_copy(
+            update={
+                "summary": "connection pool and cache miss signals rose together",
+                "attributes": {},
+            }
+        )
+        if item.source in {EvidenceSource.METRICS, EvidenceSource.LOGS}
+        else item
+        for item in case.evidence
+    ]
+    tool = FixtureEvidenceTool(evidence)
+    service = create_service(
+        db_path=tmp_path / "conflict-resolved.db",
+        evidence_tool=tool,
+        orchestration_mode="multi",
+    )
+
+    result = service.investigate(case.task.model_copy(update={"query_budget": 3}))
+
+    assert result.report.status == IncidentStatus.DIAGNOSED
+    assert result.report.selected_code == "database_pool_exhaustion"
+    assert result.report.tool_queries == 3
+    assert [step.actor for step in result.trace[:-1]] == [
+        "metrics-investigator", "logs-investigator", "traces-investigator"
+    ]
+    reviews = [
+        event for event in service.audit.list_events(trace_id=result.trace_id, limit=100)
+        if event["action"] == "evidence_reviewed"
+    ]
+    assert [event["status"] for event in reversed(reviews)] == ["needs_human", "diagnosed"]
+    assert [event["details"]["reason_code"] for event in reversed(reviews)] == [
+        "competing_candidates", "supported"
+    ]
+
+    limited_service = create_service(
+        db_path=tmp_path / "conflict-unresolved.db",
+        evidence_tool=FixtureEvidenceTool(evidence),
+        orchestration_mode="multi",
+    )
+    limited = limited_service.investigate(
+        case.task.model_copy(update={"query_budget": 2})
+    )
+    assert limited.report.status == IncidentStatus.NEEDS_HUMAN
+    assert limited.report.selected_code is None
+    assert "competing" in limited.report.unresolved_questions[0]
 
 
 def test_gateway_rejects_evidence_outside_worker_scope(tmp_path) -> None:

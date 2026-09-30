@@ -1,0 +1,33 @@
+{
+  "schema_version": "0.1",
+  "candidates": [
+    {
+      "candidate_id": "cf-2025-09-12",
+      "group_id": "cf-dashboard-api-2025-09-12",
+      "source_url": "https://blog.cloudflare.com/deep-dive-into-cloudflares-sept-12-dashboard-and-api-outage/",
+      "report_scope": "single_incident",
+      "intended_split": "development",
+      "decision_cutoff_at": null,
+      "contemporaneous_evidence": [],
+      "label_status": "ambiguous",
+      "proposed_code": null,
+      "license_review_ref": null,
+      "redaction_review_ref": null,
+      "independent_label_review_ref": null
+    },
+    {
+      "candidate_id": "cf-2025-03-21",
+      "group_id": "cf-r2-2025-03-21",
+      "source_url": "https://blog.cloudflare.com/cloudflare-incident-march-21-2025/",
+      "report_scope": "single_incident",
+      "intended_split": "development",
+      "decision_cutoff_at": null,
+      "contemporaneous_evidence": [],
+      "label_status": "out_of_taxonomy",
+      "proposed_code": null,
+      "license_review_ref": null,
+      "redaction_review_ref": null,
+      "independent_label_review_ref": null
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 [project]
 name = "sentinelops"
-version = "0.4.6"
+version = "0.11.0"
 description = "Evidence-first bounded incident investigation Agent with verifiable audit trail"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,6 +25,12 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+sentinelops = [
+    "demo_assets/*.html", "demo_assets/*.css", "demo_assets/*.js",
+    "operator_assets/*.html", "operator_assets/*.css", "operator_assets/*.js",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

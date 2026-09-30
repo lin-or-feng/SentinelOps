@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
@@ -140,6 +140,13 @@ class RootCauseCandidate(StrictModel):
 
 class EvidenceReview(StrictModel):
     status: IncidentStatus
+    reason_code: Literal[
+        "no_match",
+        "insufficient_support",
+        "competing_candidates",
+        "evidence_identity_conflict",
+        "supported",
+    ]
     candidates: list[RootCauseCandidate] = Field(default_factory=list, max_length=10)
     selected_code: str | None = None
     evidence_ids: list[str] = Field(default_factory=list, max_length=100)
@@ -152,10 +159,14 @@ class EvidenceReview(StrictModel):
         if self.selected_code is not None and self.selected_code not in candidate_codes:
             raise ValueError("review selected_code must reference a candidate")
         if self.status == IncidentStatus.DIAGNOSED:
-            if self.selected_code is None or len(set(self.supporting_sources)) < 2:
+            if (
+                self.selected_code is None
+                or len(set(self.supporting_sources)) < 2
+                or self.reason_code != "supported"
+            ):
                 raise ValueError("diagnosed reviews require two independent evidence sources")
-        elif self.selected_code is not None:
-            raise ValueError("needs_human reviews cannot select a root cause")
+        elif self.selected_code is not None or self.reason_code == "supported":
+            raise ValueError("needs_human reviews cannot select a supported root cause")
         return self
 
 

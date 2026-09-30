@@ -8,6 +8,7 @@ import json
 import sqlite3
 import threading
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,7 +60,7 @@ class AuditLog:
         return connection
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS audit_events ("
                 "sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, "
@@ -89,42 +90,67 @@ class AuditLog:
         status: str,
         details: dict[str, Any] | None = None,
     ) -> str:
+        with self._lock, closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self.append_in_transaction(
+                connection,
+                trace_id=trace_id,
+                actor=actor,
+                action=action,
+                resource=resource,
+                status=status,
+                details=details,
+            )
+
+    def append_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        trace_id: str,
+        actor: str,
+        action: str,
+        resource: str,
+        status: str,
+        details: dict[str, Any] | None = None,
+    ) -> str:
+        """Append on the caller's active write transaction; caller owns commit/rollback."""
+        if not connection.in_transaction:
+            raise ValueError("audit append requires an active transaction")
         event_id = f"audit-{uuid.uuid4().hex}"
         created_at = datetime.now(timezone.utc).isoformat()
         safe_details = redact_details(details or {})
         details_json = self._canonical(safe_details)
-        with self._lock, self._connect() as connection:
-            previous = connection.execute(
-                "SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1"
-            ).fetchone()
-            previous_hash = previous[0] if previous else "GENESIS"
-            fields = {
-                "event_id": event_id,
-                "created_at": created_at,
-                "trace_id": trace_id,
-                "actor": actor,
-                "action": action,
-                "resource": resource,
-                "status": status,
-                "details_json": details_json,
-                "previous_hash": previous_hash,
-                "algorithm": self.algorithm,
-            }
-            event_hash = self._digest(self._canonical(fields))
-            connection.execute(
-                "INSERT INTO audit_events "
-                "(event_id, created_at, trace_id, actor, action, resource, status, "
-                "details_json, previous_hash, event_hash, algorithm) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    event_id, created_at, trace_id, actor, action, resource, status,
-                    details_json, previous_hash, event_hash, self.algorithm,
-                ),
-            )
+        previous = connection.execute(
+            "SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        previous_hash = previous[0] if previous else "GENESIS"
+        fields = {
+            "event_id": event_id,
+            "created_at": created_at,
+            "trace_id": trace_id,
+            "actor": actor,
+            "action": action,
+            "resource": resource,
+            "status": status,
+            "details_json": details_json,
+            "previous_hash": previous_hash,
+            "algorithm": self.algorithm,
+        }
+        event_hash = self._digest(self._canonical(fields))
+        connection.execute(
+            "INSERT INTO audit_events "
+            "(event_id, created_at, trace_id, actor, action, resource, status, "
+            "details_json, previous_hash, event_hash, algorithm) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_id, created_at, trace_id, actor, action, resource, status,
+                details_json, previous_hash, event_hash, self.algorithm,
+            ),
+        )
         return event_id
 
     def verify(self) -> AuditVerification:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(
                 "SELECT sequence, event_id, created_at, trace_id, actor, action, resource, "
                 "status, details_json, previous_hash, event_hash, algorithm "
@@ -163,7 +189,7 @@ class AuditLog:
         else:
             sql += " ORDER BY sequence DESC LIMIT ?"
             params = (max(1, min(limit, 500)),)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(sql, params).fetchall()
         keys = (
             "sequence", "event_id", "created_at", "trace_id", "actor", "action",

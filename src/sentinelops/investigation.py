@@ -14,6 +14,7 @@ from sentinelops.domain import (
     DiagnosisReport,
     IncidentStatus,
     IncidentTask,
+    EvidenceSource,
     InvestigationResult,
     InvestigationTraceStep,
     OrchestrationMode,
@@ -42,12 +43,14 @@ class BoundedInvestigationAgent:
         store: InvestigationStore,
         policy: InvestigationPolicy | None = None,
         config: AgentConfig | None = None,
+        allowed_sources: frozenset[EvidenceSource] | None = None,
     ) -> None:
         self.gateway = gateway
         self.audit = audit
         self.store = store
         self.policy = policy or HeuristicInvestigationPolicy()
         self.config = config or AgentConfig()
+        self.allowed_sources = allowed_sources
 
     def run(
         self,
@@ -57,7 +60,7 @@ class BoundedInvestigationAgent:
         trace_id: str | None = None,
     ) -> InvestigationResult:
         trace_id = trace_id or f"trace-{uuid.uuid4().hex}"
-        state = InvestigationState(task=task)
+        state = InvestigationState(task=task, allowed_sources=self.allowed_sources)
         trace: list[InvestigationTraceStep] = []
         degraded: list[str] = []
         budget = InvestigationBudget(
@@ -169,7 +172,6 @@ class BoundedInvestigationAgent:
             trace=trace,
             degraded_components=sorted(set(degraded)),
         )
-        self.store.save(result)
         completion_details: dict[str, object] = {
             "selected_code": report.selected_code,
             "evidence_count": len(report.evidence_ids),
@@ -178,12 +180,10 @@ class BoundedInvestigationAgent:
         }
         if request_id is not None:
             completion_details["request_id"] = request_id
-        self.audit.append(
-            trace_id=trace_id,
+        self.store.save_with_completion_audit(
+            result,
+            self.audit,
             actor="investigation-agent",
-            action="investigation_completed",
-            resource=task.incident_id,
-            status=report.status.value,
             details=completion_details,
         )
         return result

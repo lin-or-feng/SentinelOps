@@ -24,6 +24,14 @@ class ResponseTooLarge(ProviderPayloadError):
     pass
 
 
+class ProviderAuthorizationError(ProviderPayloadError):
+    """The configured read-only credential was rejected; never expose response text."""
+
+
+class ProviderRateLimitError(ConnectionError):
+    """The upstream rejected the bounded read due to its rate limit."""
+
+
 class ProviderEndpoint(StrictModel):
     base_url: str = Field(min_length=8, max_length=500)
     allowed_hosts: frozenset[str] = Field(min_length=1)
@@ -104,7 +112,13 @@ class _JsonEndpointClient:
             ) as response:
                 if 300 <= response.status_code < 400:
                     raise ProviderPayloadError("provider redirects are not allowed")
-                if response.status_code == 408 or response.status_code == 429 or response.status_code >= 500:
+                if response.status_code in {401, 403}:
+                    raise ProviderAuthorizationError("provider authorization failed")
+                if response.status_code == 429:
+                    raise ProviderRateLimitError("provider rate limited the request")
+                if response.status_code == 408:
+                    raise TimeoutError("provider returned request timeout")
+                if response.status_code >= 500:
                     raise ConnectionError(f"provider returned retryable HTTP {response.status_code}")
                 if response.status_code >= 400:
                     raise ProviderPayloadError(f"provider returned HTTP {response.status_code}")

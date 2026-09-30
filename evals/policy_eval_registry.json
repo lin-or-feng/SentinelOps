@@ -1,0 +1,30 @@
+{
+  "schema_version": "0.1",
+  "datasets": [
+    {
+      "dataset_id": "source-selection-public-v1",
+      "dataset_path": "policy_cases.json",
+      "dataset_schema_version": "0.2",
+      "dataset_sha256": "6fe6470aede356247164babca99860c75ce558f38217d2c01488cd332cc93058",
+      "development_cases": 30,
+      "holdout_cases": 30,
+      "holdout_status": "consumed",
+      "qualification": {
+        "qualification_id": "qwen2.5-7b-source-selection-v1-20260928",
+        "evaluated_on": "2026-09-28",
+        "prompt_id": "source-selection-v1",
+        "prompt_sha256": "4c9aed3b627bdcefc15b5b25ac15b2fc16fb7509ae4dba34b48c585a9bcf02b9",
+        "model": "qwen2.5:7b",
+        "model_digest": "845dbda0ea48ed749caafd9e6037047aa19acfcfd82e704d7ca97d631a0b697e",
+        "runs": 3,
+        "required_top1": 1.0,
+        "observed_top1": 0.9,
+        "prediction_stability_rate": 1.0,
+        "candidate_call_success_rate": 1.0,
+        "safety_guard_rate": 1.0,
+        "forbidden_execution_rate": 0.0,
+        "decision": "rejected"
+      }
+    }
+  ]
+}

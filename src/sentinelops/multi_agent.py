@@ -29,7 +29,8 @@ from sentinelops.domain import (
 )
 from sentinelops.gateway import EvidenceGateway, EvidenceToolError
 from sentinelops.policy import HeuristicInvestigationPolicy, InvestigationPolicy
-from sentinelops.storage import InvestigationStore
+from sentinelops.specialist_shadow import ShadowSpecialist
+from sentinelops.storage import AssignmentJournal, EvidenceJournal, InvestigationStore
 
 
 @dataclass(frozen=True)
@@ -96,17 +97,39 @@ class EvidenceReviewer:
 
     actor = "evidence-reviewer"
 
-    def __init__(self, *, min_confidence: float = 0.65, min_sources: int = 2) -> None:
+    def __init__(
+        self,
+        *,
+        min_confidence: float = 0.65,
+        min_sources: int = 2,
+        min_candidate_margin: float = 0.15,
+    ) -> None:
         self.min_confidence = min(max(min_confidence, 0.0), 1.0)
         self.min_sources = max(2, min_sources)
+        if not 0.0 <= min_candidate_margin <= 1.0:
+            raise ValueError("min_candidate_margin must be between 0 and 1")
+        self.min_candidate_margin = min_candidate_margin
 
     def review(self, evidence: list[Evidence]) -> EvidenceReview:
-        unique = {item.evidence_id: item for item in evidence}
+        unique: dict[str, Evidence] = {}
+        for item in evidence:
+            previous = unique.get(item.evidence_id)
+            if previous is not None and previous != item:
+                return EvidenceReview(
+                    status=IncidentStatus.NEEDS_HUMAN,
+                    reason_code="evidence_identity_conflict",
+                    rationale=(
+                        "the same evidence identity has conflicting contents; "
+                        "manual integrity review is required"
+                    ),
+                )
+            unique[item.evidence_id] = item
         normalized = sorted(unique.values(), key=lambda item: item.evidence_id)
         candidates = rank_root_causes(normalized)
         if not candidates:
             return EvidenceReview(
                 status=IncidentStatus.NEEDS_HUMAN,
+                reason_code="no_match",
                 rationale="no known root-cause signal matched the reviewed evidence",
             )
 
@@ -121,8 +144,38 @@ class EvidenceReviewer:
             key=lambda source: source.value,
         )
         if selected.score >= self.min_confidence and len(sources) >= self.min_sources:
+            for competitor in candidates[1:]:
+                if selected.score - competitor.score >= self.min_candidate_margin:
+                    break
+                competitor_sources = {
+                    evidence_by_id[evidence_id].source
+                    for evidence_id in competitor.evidence_ids
+                    if evidence_id in evidence_by_id
+                }
+                if (
+                    competitor.score >= self.min_confidence
+                    and len(competitor_sources) >= self.min_sources
+                ):
+                    return EvidenceReview(
+                        status=IncidentStatus.NEEDS_HUMAN,
+                        reason_code="competing_candidates",
+                        candidates=candidates,
+                        evidence_ids=sorted(
+                            set(selected.evidence_ids) | set(competitor.evidence_ids)
+                        ),
+                        supporting_sources=sorted(
+                            set(sources) | competitor_sources,
+                            key=lambda source: source.value,
+                        ),
+                        rationale=(
+                            "competing root-cause candidates require additional "
+                            "independent evidence or human review"
+                        ),
+                    )
+        if selected.score >= self.min_confidence and len(sources) >= self.min_sources:
             return EvidenceReview(
                 status=IncidentStatus.DIAGNOSED,
+                reason_code="supported",
                 candidates=candidates,
                 selected_code=selected.code,
                 evidence_ids=selected.evidence_ids,
@@ -134,6 +187,7 @@ class EvidenceReviewer:
             )
         return EvidenceReview(
             status=IncidentStatus.NEEDS_HUMAN,
+            reason_code="insufficient_support",
             candidates=candidates,
             evidence_ids=selected.evidence_ids,
             supporting_sources=sources,
@@ -156,14 +210,18 @@ class BoundedMultiAgentSupervisor:
         config: MultiAgentConfig | None = None,
         policy: InvestigationPolicy | None = None,
         reviewer: EvidenceReviewer | None = None,
+        shadow: ShadowSpecialist | None = None,
     ) -> None:
         self.gateway = gateway
         self.audit = audit
         self.store = store
+        self.assignment_journal = AssignmentJournal(store.db_path)
+        self.evidence_journal = EvidenceJournal(store.db_path)
         self.allowed_sources = allowed_sources
         self.config = config or MultiAgentConfig()
         self.policy = policy or HeuristicInvestigationPolicy()
         self.reviewer = reviewer or EvidenceReviewer()
+        self.shadow = shadow
         self._workers = {
             source: SourceInvestigator(source, gateway) for source in allowed_sources
         }
@@ -204,6 +262,7 @@ class BoundedMultiAgentSupervisor:
             thread_name_prefix="sentinelops-investigator",
         ) as executor:
             for assignment in assignments:
+                self.assignment_journal.create(trace_id, assignment)
                 self.audit.append(
                     trace_id=trace_id,
                     actor="multi-agent-supervisor",
@@ -215,6 +274,7 @@ class BoundedMultiAgentSupervisor:
                         "worker": assignment.actor,
                     },
                 )
+                self.assignment_journal.start(assignment.assignment_id)
                 futures[assignment.assignment_id] = executor.submit(
                     self._workers[assignment.query.source].run,
                     assignment,
@@ -252,6 +312,7 @@ class BoundedMultiAgentSupervisor:
                         error_type=type(exc).__name__,
                         duration_ms=0,
                     )
+            self.assignment_journal.finish(finding.assignment_id, finding.status)
             self.audit.append(
                 trace_id=trace_id,
                 actor="multi-agent-supervisor",
@@ -280,11 +341,14 @@ class BoundedMultiAgentSupervisor:
         started = time.perf_counter()
         deadline_seconds = min(self.config.deadline_seconds, float(task.deadline_seconds))
         query_limit = min(self.config.max_queries, task.query_budget)
-        base_sources = [
-            source
-            for source in self.policy.source_order(task)
-            if source in self.allowed_sources
-        ][:query_limit]
+        fallback_sources = list(
+            dict.fromkeys(
+                source
+                for source in self.policy.source_order(task)
+                if isinstance(source, EvidenceSource) and source in self.allowed_sources
+            )
+        )
+        base_sources = fallback_sources[:query_limit]
         start_details: dict[str, object] = {
             "service": task.service,
             "orchestration_mode": self.orchestration_mode.value,
@@ -306,11 +370,37 @@ class BoundedMultiAgentSupervisor:
         ordered_sources = (
             planner(task, allowed_sources=self.allowed_sources, trace_id=trace_id)
             if callable(planner)
-            else base_sources
+            else fallback_sources
         )
-        source_plan = [
-            source for source in ordered_sources if source in self.allowed_sources
-        ][:query_limit]
+        source_plan: list[EvidenceSource] = []
+        duplicate_count = out_of_scope_count = 0
+        for source in ordered_sources:
+            if not isinstance(source, EvidenceSource) or source not in fallback_sources:
+                out_of_scope_count += 1
+            elif source in source_plan:
+                duplicate_count += 1
+            else:
+                source_plan.append(source)
+        missing_count = 0
+        for source in fallback_sources:
+            if source not in source_plan:
+                source_plan.append(source)
+                missing_count += 1
+        source_plan = source_plan[:query_limit]
+        if duplicate_count or out_of_scope_count or missing_count:
+            self.audit.append(
+                trace_id=trace_id,
+                actor="multi-agent-supervisor",
+                action="source_plan_normalized",
+                resource=task.incident_id,
+                status="degraded",
+                details={
+                    "duplicates_removed": duplicate_count,
+                    "out_of_scope_removed": out_of_scope_count,
+                    "fallback_sources_added": missing_count,
+                    "effective_sources": [source.value for source in source_plan],
+                },
+            )
 
         findings: list[InvestigatorFinding] = []
         reviewed_evidence: list[Evidence] = []
@@ -347,6 +437,11 @@ class BoundedMultiAgentSupervisor:
                     )
                 )
             review = self.reviewer.review(reviewed_evidence)
+            if review.reason_code != "evidence_identity_conflict":
+                self.evidence_journal.record_batch(
+                    trace_id,
+                    [item for finding in wave_findings for item in finding.evidence],
+                )
             self.audit.append(
                 trace_id=trace_id,
                 actor=self.reviewer.actor,
@@ -354,12 +449,15 @@ class BoundedMultiAgentSupervisor:
                 resource=task.incident_id,
                 status=review.status.value,
                 details={
+                    "reason_code": review.reason_code,
                     "candidate": review.selected_code,
                     "evidence_count": len(review.evidence_ids),
                     "supporting_sources": [source.value for source in review.supporting_sources],
                 },
             )
-            if review.status == IncidentStatus.DIAGNOSED:
+            if review.status == IncidentStatus.DIAGNOSED or (
+                review.reason_code == "evidence_identity_conflict"
+            ):
                 break
 
         timed_out = time.perf_counter() - started > deadline_seconds
@@ -410,9 +508,13 @@ class BoundedMultiAgentSupervisor:
                     for finding in failures
                 }
                 | ({"deadline"} if timed_out else set())
+                | (
+                    {"evidence_integrity"}
+                    if review.reason_code == "evidence_identity_conflict"
+                    else set()
+                )
             ),
         )
-        self.store.save(result)
         completion_details: dict[str, object] = {
             "orchestration_mode": self.orchestration_mode.value,
             "selected_code": report.selected_code,
@@ -423,14 +525,35 @@ class BoundedMultiAgentSupervisor:
         }
         if request_id is not None:
             completion_details["request_id"] = request_id
-        self.audit.append(
-            trace_id=trace_id,
+        self.store.save_with_completion_audit(
+            result,
+            self.audit,
             actor="multi-agent-supervisor",
-            action="investigation_completed",
-            resource=task.incident_id,
-            status=report.status.value,
             details=completion_details,
         )
+        if self.shadow is not None and review.reason_code != "evidence_identity_conflict":
+            observed = 0
+            for finding in findings:
+                if finding.status != InvestigatorStatus.OK or not finding.evidence:
+                    continue
+                if observed >= self.shadow.max_observations:
+                    break
+                observed += 1
+                try:
+                    self.shadow.observe(trace_id, finding)
+                except Exception:
+                    # Shadow telemetry cannot change a completed deterministic verdict.
+                    try:
+                        self.audit.append(
+                            trace_id=trace_id,
+                            actor="shadow-specialist",
+                            action="hypothesis_observed",
+                            resource=finding.source.value,
+                            status="degraded",
+                            details={"reason_code": "shadow_recording_failure"},
+                        )
+                    except Exception:
+                        pass
         return result
 
 
@@ -509,8 +632,14 @@ class AdaptiveInvestigationAgent:
         self.audit = audit
         self.router = router or OrchestrationRouter()
 
-    def run(self, task: IncidentTask, *, request_id: str | None = None) -> InvestigationResult:
-        trace_id = f"trace-{uuid.uuid4().hex}"
+    def run(
+        self,
+        task: IncidentTask,
+        *,
+        request_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> InvestigationResult:
+        trace_id = trace_id or f"trace-{uuid.uuid4().hex}"
         decision = self.router.decide(task)
         details: dict[str, object] = {
             "requested_mode": self.orchestration_mode.value,

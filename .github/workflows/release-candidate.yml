@@ -1,0 +1,28 @@
+name: SentinelOps release candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - run: python scripts/release_check.py
+      - run: python scripts/package_check.py --output-dir dist
+      - run: docker build --tag sentinelops:release-candidate .
+      - run: docker run --rm --network none sentinelops:release-candidate python -m sentinelops --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sentinelops-wheel-${{ github.sha }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 14

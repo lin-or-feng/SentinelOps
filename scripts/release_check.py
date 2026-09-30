@@ -41,6 +41,13 @@ def main() -> int:
         str(ROOT / "evals" / "observability_replays.json"),
     )
     run("-m", "sentinelops", "baseline", "--min-top1", "1.0")
+    run(
+        "-m",
+        "sentinelops",
+        "policy-eval-registry-check",
+        "--registry",
+        str(ROOT / "evals" / "policy_eval_registry.json"),
+    )
     run("-m", "sentinelops", "orchestration-eval", "--min-top1", "1.0")
     run(
         "-m",

@@ -1,6 +1,28 @@
 import sqlite3
 
+from concurrent.futures import ThreadPoolExecutor
+
 from sentinelops.audit import AuditLog, redact_details
+
+
+def test_separate_audit_instances_serialize_hash_chain(tmp_path) -> None:
+    db_path = tmp_path / "parallel-audit.db"
+    logs = [AuditLog(db_path, key="shared-test-key") for _ in range(4)]
+
+    def append_one(index: int) -> None:
+        logs[index % len(logs)].append(
+            trace_id=f"trace-{index}",
+            actor="test",
+            action="parallel_append",
+            resource=f"resource-{index}",
+            status="ok",
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(append_one, range(40)))
+    verification = logs[0].verify()
+    assert verification.valid
+    assert verification.event_count == 40
 
 
 def test_redaction_is_recursive() -> None:

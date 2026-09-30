@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SentinelOps · 本地验证台</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">S</span><span>Sentinel<span class="brand-light">Ops</span></span></div>
+      <div class="top-status"><span class="pulse"></span> 本机只读验证 <span id="version"></span></div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="eyebrow">INVESTIGATION VERIFICATION DESK / 0.11</div>
+        <h1>看见每一步，<br><span>验证每个结论。</span></h1>
+        <p>选择合成事故，运行有界 Agent。对照预期根因、证据引用、派工状态与审计哈希链；默认不连接真实监控或模型，不消耗 holdout。</p>
+      </section>
+
+      <div class="workspace">
+        <aside class="control-panel card">
+          <div class="panel-heading"><span class="step-index">01</span><div><h2>配置实验</h2><p>同一案例，三种编排方式</p></div></div>
+          <label class="field-label" for="case-select">事故案例</label>
+          <select id="case-select" disabled><option>正在读取本地案例…</option></select>
+          <div id="case-note" class="case-note">仅使用仓库自带合成夹具</div>
+          <div class="field-label mode-label">编排模式</div>
+          <div class="mode-picker" role="radiogroup" aria-label="编排模式">
+            <label><input type="radio" name="mode" value="single"><span>Single<small>单 Agent</small></span></label>
+            <label><input type="radio" name="mode" value="multi" checked><span>Multi<small>多 Agent</small></span></label>
+            <label><input type="radio" name="mode" value="auto"><span>Auto<small>成本路由</small></span></label>
+          </div>
+          <button id="run-button" class="run-button" type="button" disabled>运行闭环验证 <span aria-hidden="true">↗</span></button>
+          <p class="helper">每次都新建临时 SQLite；运行后自动核验结果落盘和审计链。</p>
+          <div class="boundary">
+            <div class="boundary-title">安全边界</div>
+            <ul><li>Fixture 只读证据</li><li>确定性策略，影子模型关闭</li><li>助手需显式启用，仅解释已引用证据</li><li>只接受本机访问</li><li>不授予生产裁决权限</li></ul>
+          </div>
+        </aside>
+
+        <section class="results">
+          <div id="notice" class="notice" role="status" aria-live="polite">请选择案例并运行。建议先选“全部案例”，查看完整门禁。</div>
+          <div class="metric-grid">
+            <div class="metric card"><span>闭环通过</span><strong id="metric-pass">—</strong><small id="metric-pass-sub">尚未运行</small></div>
+            <div class="metric card"><span>根因正确</span><strong id="metric-correct">—</strong><small>相对合成夹具预期</small></div>
+            <div class="metric card"><span>执行模式</span><strong id="metric-mode">—</strong><small>实际路由见案例详情</small></div>
+          </div>
+          <section class="card result-card">
+            <div class="panel-heading"><span class="step-index">02</span><div><h2>验证结果</h2><p>逐案例检查，而非只看一个总分</p></div></div>
+            <div id="case-results" class="case-results empty-state">运行后这里会列出每起事故的结论与五项闭环检查。</div>
+          </section>
+          <section class="card detail-card">
+            <div class="panel-heading"><span class="step-index">03</span><div><h2>过程透视</h2><p>派工 · 证据 · Trace · 审计</p></div></div>
+            <div id="detail-placeholder" class="empty-state">点击上方某个案例，查看完整调查轨迹。</div>
+            <div id="detail-content" hidden>
+              <div class="detail-hero"><div><span class="micro-label">TRACE ID</span><code id="trace-id"></code></div><span id="detail-status" class="badge"></span></div>
+              <div class="detail-meta" id="detail-meta"></div>
+              <div class="section-title">角色派工 <span id="assignment-count"></span></div><div id="assignments" class="rail"></div>
+              <div class="section-title">证据引用 <span id="evidence-count"></span></div><div id="evidence" class="evidence-list"></div>
+              <div class="section-title">执行轨迹 <span id="trace-count"></span></div><div id="trace" class="timeline"></div>
+              <div class="section-title">审计链 <span id="audit-count"></span></div><div id="audit-events" class="timeline audit-timeline"></div>
+            </div>
+          </section>
+          <section class="card assistant-card">
+            <div class="panel-heading"><span class="step-index">04</span><div><h2>只读 AI 助手 <span class="assistant-tag">可选预览</span></h2><p>解释已完成调查，不改变结论或执行新查询</p></div></div>
+            <p id="assistant-status" class="assistant-status" role="status">正在检查本机助手状态…</p>
+            <form id="assistant-form">
+              <label class="field-label" for="assistant-question">针对当前选中案例提问</label>
+              <textarea id="assistant-question" maxlength="300" rows="3" placeholder="例如：为什么判断为这个根因？还有哪些不确定性？" disabled></textarea>
+              <button id="assistant-button" class="run-button assistant-button" type="submit" disabled>请求辅助解释</button>
+            </form>
+            <div id="assistant-answer" class="assistant-answer empty-state" aria-live="polite">先运行并选择一条案例；未显式启用 Ollama 时，助手不会调用模型。</div>
+            <p class="helper">单轮提问，无聊天记忆；只发送当前结论和已引用的合成证据。本内容是 AI 辅助解释，不是新的诊断或生产建议。</p>
+          </section>
+        </section>
+      </div>
+    </main>
+    <footer>SentinelOps · 离线演示结果不代表真实模型泛化能力或生产资格。</footer>
+  </div>
+</body>
+</html>

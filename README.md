@@ -1,10 +1,130 @@
-# SentinelOps 0.4.6
+# SentinelOps 0.11.0
 
 SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围绕真实生产约束设计：Agent 只能查询指标、日志、链路和变更记录；每次调查受步骤、查询次数和截止时间限制；结论必须引用证据；证据不足时升级人工，而不是编造根因。
 
-当前版本提供**可复现的单 Agent 基线 + 可选有界多 Agent 协作 + 成本感知自动路由 + 受控本地模型策略**，不是生产事故平台。默认使用 Fixture 与确定性策略做离线评测，不访问外部系统；显式启用 observability 模式后，可通过同一领域契约连接 Prometheus、Loki、Tempo 的只读 API。
+当前版本提供**可复现的单 Agent 基线 + 可选有界多 Agent 协作 + 成本感知自动路由 + 受控本地模型策略 + Specialist 影子实验**，不是生产事故平台。默认使用 Fixture 与确定性策略做离线评测，不访问外部系统；显式启用 observability 模式后，可通过同一领域契约连接 Prometheus、Loki、Tempo 的只读 API。
 
-## 0.4.6 已完成能力
+当前 1.0 前进度见 [发布资格验收](docs/RELEASE_READINESS.md) 与 [变更记录](CHANGELOG.md)。版本仍是 0.11.0；代码推送不等于 1.0 发布，尚未打 1.0 标签或进行正式发布。
+
+## 未发布：本机真实只读调查台
+
+新增与 `8765` 合成验证台分离的本机入口 `python -m sentinelops.operator_web --db <仓库外绝对路径>`（默认 `127.0.0.1:8767`）。它只接受真实 observability 适配器，启动前执行 pilot 静态安全预检；页面强制 Token、同任务来源预检与人工确认，展示调查结论、证据 ID、Trace 和审计，还可按事故 ID 只读找回已保存结果，不重复查询 Provider。不启用 AI 裁决，也不回退夹具。真实凭据和获批事故样本仍需操作者提供，故不能将此入口视为已完成真实联调。配置、失败定位与复核见[本机真实调查台](docs/OPERATOR_DESK.md)。
+
+上线前的浏览器流程可用 `.\.venv\Scripts\python.exe -m scripts.operator_offline_acceptance` 一键在**假来源**下复现：自动完成连接、预检、显式确认、审计、刷新找回及关页后恢复；报告与截图仅写入忽略目录 `.sentinelops/`，明确标记 `OFFLINE TEST`，不构成真实联调或发布资格。前置条件和结果见[离线浏览器验收](docs/OPERATOR_OFFLINE_ACCEPTANCE.md)。
+
+## 0.11.0 只读 AI 辅助解释预览
+
+- 本地验证台增加针对**已完成合成事故**的单轮提问。默认关闭；显式启用后，助手只读取当前运行中最终结论已引用的最多 8 条合成证据、症状与规则结论，不接收夹具预期答案、审计原文、工具权限或外部 URL。回答必须给出原结论、证据 ID 与不确定性；根因改写、越界/重复引用、隐私命中、无效结构均失败关闭。AI 输出不回写调查结果或审计，不触发新查询或修复动作。
+- 保留每次运行的短期本机内存索引（最多 12 次、10 分钟），仅用于把追问绑定到正确的运行和事故；不存模型回答、不新增聊天记忆或持久化数据库。此预览不代表 AI 已通过真实事故诊断资格。
+- 在 `D:\agents` 的 PowerShell 中显式开启本机 Ollama（另开终端保持 Ollama 运行），然后重启验证台：
+
+```powershell
+$env:SENTINELOPS_DEMO_ASSISTANT = "ollama"
+$env:SENTINELOPS_OLLAMA_MODEL = "<本机已安装的模型名>"
+$env:SENTINELOPS_OLLAMA_TIMEOUT_SECONDS = "20"
+.\.venv\Scripts\python.exe -m sentinelops.demo_web
+```
+
+访问 `http://127.0.0.1:8765/`，先运行案例，再在详情下方提问。若旧验证台仍占用 8765，先在原窗口按 `Ctrl+C`，再启动新版本；不必改变正式 API。关闭 `SENTINELOPS_DEMO_ASSISTANT` 或设为 `off` 并重启，即恢复完全不调用模型的演示。见[验证台说明](docs/DEMO_VERIFICATION.md)。
+
+## 0.10.0 公开事故数据准入预检
+
+- 新增只读 `incident-intake-check`：只读取有界 JSON 元数据，不下载复盘、不调用模型、不登记或消费 holdout。检查独立事故分组、现有 Specialist 根因分类是否适配、证据是否在设定决策时刻前可用，以及许可、脱敏、独立标注的外部复核编号。输出固定原因码，不回显证据正文。
+- 首批两条官方公开复盘仅列为 **development 候选**。一条暂列分类范围外，一条暂列多因素标签不明确；均缺乏经核实的同时点证据和审批，因此预检返回 `blocked`，不能拿来宣称真实事故准确率。即使所有机器可查条件满足，状态也只会是 `manual_review_required`，不会自动批准数据集。
+- 运行 `python -m sentinelops incident-intake-check --manifest evals/public_incident_candidates.json` 可查看逐例阻断原因；返回码 `1` 表示候选仍被阻断，当前样例预期如此。准入流程、不可由程序验证的事项见[公开事故候选池](docs/PUBLIC_INCIDENT_INTAKE.md)。
+
+## 0.9.0 本地可视化验证台
+
+- 新增独立 FastAPI 演示页：选择四条合成事故之一或全部，切换 `single` / `multi` / `auto`，查看实际路由、专项 Worker 派工、证据引用、执行 Trace 和哈希链审计事件。
+- 每次点击都在独立临时 SQLite 中重新调查；页面逐例核验预期根因、证据作用域、审计链、结果持久化和运行终态，并显示通过数。临时数据保存在项目忽略目录 `.sentinelops/demo-temp`，结束后清理。
+- 演示服务只接受本机客户端、固定合成夹具和确定性策略，强制关闭模型/真实 Provider；限制请求体、频率和并发，前端无外部资源。它不是生产监控台，也不读取或消耗封存 holdout。
+
+在 `D:\agents` 目录保持命令行窗口打开，运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m sentinelops.demo_web
+```
+
+浏览器打开 `http://127.0.0.1:8765/`；结束时在命令行按 `Ctrl+C`。可视化验收步骤与边界见[本地验证台说明](docs/DEMO_VERIFICATION.md)。
+
+## 0.8.0 Specialist 独立资格评测框架
+
+- 新增只读离线资格数据集契约：每例包含事故任务、限定作用域的证据、预期根因、事故组和 `development|holdout`；同组不得跨拆分。登记前执行限长、隐私扫描、路径约束、规范化 SHA-256 与跨数据集完全相同输入重叠检查。真实标签来源和语义近似污染仍需人工审核；登记时要求填写外部审批编号，但程序无法证明审批真实性。
+- 独立 SQLite 注册表实现 `sealed → reserved → consumed`。每次资格活动在模型调用前原子预留封存 holdout，之后不可自动重开；至少 20 条 holdout、固定模型 digest/Prompt 哈希、2–10 轮新建的离线调查。每轮重新检查模型 digest，并保留结构化中间报告；中断后停在 `reserved`，需要人工核查。完成后无论通过还是拒绝，holdout 都标记 `consumed`。
+- 门禁按**所有影子调用**计算正确率与接受率，要求确定性最终结论、模型 Top-1、引用边界、跨轮预测稳定性全部通过，并限制影子调用 P95 和单次 Token 用量。资格结果仅为离线技术证据；即使 `accepted`，报告仍固定 `production_qualified=false`，不会改变 Reviewer 权限、启用生产 Provider 或自动发布。
+- 命令：`specialist-shadow-register` 登记人工复核数据集，`specialist-shadow-registry-check` 只读检查，`specialist-shadow-campaign` 显式运行一次性多轮资格测试。完整流程、数据格式和失败处理见[影子评测说明](docs/SHADOW_EVALUATION.md)。目前仓库**没有**可声称独立的真实事故资格集；本轮合成测试只验证流程，不证明模型质量。
+
+## 0.7.0 Specialist 影子评测骨架
+
+- 影子记录增加独立的模型/Prompt 身份元数据：模型名、可解析的 digest、Prompt ID 与 SHA-256。已有 0.6.0 记录若缺少身份信息，仍可做普通汇总，但不能进入新的开发集对照。
+- 新增严格的事故级标签契约与只读 `specialist-shadow-eval`：对每条标签查找已完成调查和对应影子记录，核对同一模型 digest 与 Prompt 哈希；按来源输出全尝试口径的模型/规则 Top-1、接受率、越界引用次数、P95 与可用 Token 计数。缺失事故、缺失影子记录、身份漂移、重复标签或隐私命中均拒绝评测。
+- 0.7.0 的开发对照命令**只允许 development 标签**；未经治理的 holdout 被阻断。开发门禁要求最低事故数、模型调用接受率、零越界引用和不低于规则基线的正确率，但输出始终标记 `production_qualified=false`。标签是否由独立人工标注无法由代码自行证明；没有真实独立数据就不宣称模型已达生产标准。数据格式与局限见[影子评测说明](docs/SHADOW_EVALUATION.md)。
+- 运行示例：`python -m sentinelops specialist-shadow-eval --labels <开发标签.json> --db .sentinelops/shadow.db --model-name <已安装模型名> --model-digest <64位模型摘要> --min-cases 20`。此命令不调用模型或 Provider，也不写报告文件；需要先显式启用 0.6.0 影子运行积累记录。
+
+## 0.6.0 模型辅助 Specialist 影子框架
+
+- 新增严格的 `ShadowContext → ShadowHypothesis` 契约：模型每次只看到单个来源最多 25 条脱敏摘要和 `E1` 等临时引用号；不接收租户、事故 ID、原始引用、查询语言或工具权限。假设代码只能取固定枚举，必须引用该次上下文中的证据，并说明不确定性。
+- `multi` / `auto` 模式可显式启用本机 Ollama 影子推理。确定性 Reviewer 的结论先落盘，模型之后才运行；模型失败、越界引用或异常输出只记原因码，**不能修改最终诊断、继续派工或触发修复动作**。证据身份冲突时不调用影子模型。默认关闭。
+- `ShadowJournal` 只存每角色的来源、固定原因码、模型假设代码、单来源规则基线代码、是否一致、耗时与可用 Token 计数；不存 Prompt、摘要或自由文本。`specialist-shadow-report` 汇总接受率、基线一致率、P95 与 Token 用量。**基线一致率不是正确率**，目前没有独立真实事故标注可用于准入。
+- 在项目根目录、已配置 `SENTINELOPS_OLLAMA_MODEL` 且本机 Ollama 可用时，可设置 `SENTINELOPS_SPECIALIST_SHADOW=ollama`，用 `python -m sentinelops investigate --orchestration-mode multi --incident-id inc-deploy-001 --db .sentinelops/shadow.db` 运行；随后用 `python -m sentinelops specialist-shadow-report --db .sentinelops/shadow.db` 查看元数据。源码工作树运行前需安装项目或设置 `PYTHONPATH=src`。影子调用在结果落盘后同步执行，仍会增加本次请求返回时延；它不是生产流量无成本旁路。
+
+## 0.5.0 多 Agent 执行状态框架
+
+- 新增持久化 `AssignmentJournal`：每个专项任务只记录 assignment/trace/incident/actor/source 和状态，不保存症状、证据正文或模型输出；状态限制为 `created → running → completed|failed|expired`，重复身份和非法转移失败关闭。
+- Supervisor 的每次派工与完成已接入状态账本，故障 Worker 记为 `failed`，迟到/超时结果记为 `expired`；提供按 Trace 查询与显式过期未完成任务的接口。来源计划同时去重、拒绝越界来源并补回确定性备选，避免重复查询耗尽共享预算。
+- 新增事故级 `InvestigationRunJournal`：外部查询前以唯一 incident ID 原子预留运行，进程并发或重启后看到未完成/放弃的预留均拒绝再次派工，避免重复消耗查询预算。完整结果先落盘、运行再标记完成；若两者之间崩溃，重放已完成结果时修复状态，不重查 Provider。
+- 当前未发布的 P2 可靠性增量：单/多 Agent 的调查结果和 `investigation_completed` 审计事件在**同一 SQLite 事务**提交；审计写入失败则结果回滚。审计追加先取得 SQLite 写锁，避免多个审计实例并发写入时分叉哈希链。运行状态仍在另一事务更新，崩溃后由已存在的结果重放逻辑修复。
+- 新增 `EvidenceJournal`：Reviewer 验证每波 Evidence ID 一致性后，按 Trace 保存 ID 与内容的 SHA-256、来源，不保存证据正文；同名异内容拒绝并回滚整批。身份冲突的波次不入账，且不再继续派工。
+- 这是**安全失败关闭的框架，不是自动恢复或高可用队列**：没有租约、自动重派或续跑，遗留预留需人工核实后用新 incident ID 发起新的调查；账本与审计也非同一事务。`expire_incomplete` 只能在确认旧 Worker 已停止后显式调用。
+
+## 0.4.16 跨 Worker 证据身份完整性
+
+- Reviewer 对重复 Evidence ID 不再采用“后者覆盖前者”：内容完全一致时去重，内容不同则返回 `needs_human / evidence_identity_conflict`，不生成候选根因或证据引用。
+- Supervisor 将身份冲突视为不可由追加查询自动修复的完整性错误，立即停止后续波次，在结果中标记 `evidence_integrity` 降级，并以固定原因码写入审计；不会把冲突原文写入审计。
+- 测试覆盖直接裁决、端到端停止派工和相同内容去重；这解决了多 Worker 合并阶段的静默覆盖风险。任务状态持久化和同步 Provider 的硬超时仍是后续工作。
+
+## 0.4.15 多 Agent 冲突裁决
+
+- Reviewer 不再因“第一名达到置信度和双来源门槛”就忽略可信的第二名：若两个根因均获至少两个独立来源支持且分差低于 0.15，返回结构化 `competing_candidates`，不输出确定根因。
+- Supervisor 收到该结果后，在共享查询预算和截止时间内继续下一波；若仍冲突或预算耗尽，返回 `needs_human`。审计记录 Reviewer 原因码，测试覆盖“冲突→补证据→诊断”和“冲突→预算耗尽→人工”。
+- 这强化了既有 Supervisor–专项 Worker–Reviewer 架构，但目前 Worker 是受限的确定性调查员，**不是多个 LLM 自由对话**。目标分层与下一步验收标准见[多 Agent 编排说明](docs/MULTI_AGENT_ORCHESTRATION.md)。
+
+## 0.4.14 下游夹具同源对比
+
+- 策略评测报告新增下游夹具的有序 SHA-256 指纹（涵盖任务、证据与预期根因，不输出原始内容）；开发报告比较器仅在两侧指纹一致且案例数一致时计算下游 Top-1 差值，旧报告保持“不可比”。
+- 同时要求两份报告使用相同 SentinelOps 运行版本，避免把代码变化误算为 Prompt 效果。使用当前源码和同一 `qwen2.5:7b` digest 重跑 v1/v4：来源选择 25/30→28/30，下游双方均为 4/4、差值 0；v4 仍有 1 条逐案例退步，默认 Prompt 不切换。
+
+## 0.4.13 开发集对照与跨版本隔离
+
+- 新评测集登记时，拒绝把任何已登记数据集的 development 输入转作新 holdout，也拒绝旧 holdout 出现在新数据集任一拆分；完全相同输入的双向检查是最低防线，语义近似和来源污染仍须人工审查。
+- 增加 `policy-eval-dev-compare` 离线逐案例对比：仅接收同数据集、同模型 digest 的真实 development 报告，校验身份与逐案例一致性，输出改进、退步、持续失败及安全汇总；不访问 holdout，不产生资格结论。
+- 本地 v1→v4 对照为 25/30→28/30：4 条改进、1 条退步、1 条持续失败；安全 6/6、越权 0、模型调用成功率 100%。v1 首份报告未跑下游，因此该对照的下游**不可比**；v4 单独跑出的 4/4 下游结果不能当作相对收益。默认 Prompt 不切换。
+
+## 0.4.12 P1/P2 同步推进
+
+- **P1 数据准备**：新增事故级隔离的评测 Schema `0.3`：同一事故组必须整体归入 development 或 holdout；旧 `0.2` 仍可复现，但同一场景组跨拆分，不应宣称事故级独立。整理[公开事故候选池与独立标注流程](docs/PUBLIC_INCIDENT_INTAKE.md)，尚未生成或登记新 sealed 数据集。
+- **P2 开发集实验**：保存 v1 默认 Prompt，新增有独立 ID/哈希的 v2–v4 实验 Prompt，仅用于评测；服务入口拒绝实验 Prompt。`qwen2.5:7b` 在同一 30 条 development 案例上，v1 为 25/30、v4 为 28/30；v4 的 6 条安全样本均通过，有效调用 100%，但仍未达到 Top‑1=100%。
+- v2 虽达到 27/30，但安全率降为 5/6；v3 为 25/30。v4 单独运行 4 条下游事故夹具为 4/4 正确；未与同夹具 v1 报告做可验证对比。所有这些结果都来自调参用 development，不构成新资格或泛化结论，默认策略未切换。
+
+## 0.4.11 资格证据先落盘
+
+- 资格评测强制使用未占用的 `--output` JSON 路径；缺少路径、目标已存在或与输入/registry 冲突时，在模型调用前拒绝。
+- 先原子写入包含 reservation 身份的预备报告，再固化 `consumed` 资格结论，最后更新报告；最终报告写入失败时，预备证据仍在，错误会准确标注 holdout 已消费，不得重试资格运行。
+- 回归评测继续保持可选报告；本轮没有重新调用真实 Ollama 或解封旧 holdout。
+
+## 0.4.10 新评测集登记
+
+- 增加 `policy-eval-registry-register`：对已有 registry 登记新的 JSON 评测集，先验证 Schema、拆分规模、隐私、规范化指纹、重复 ID/路径及跨版本隐藏输入重叠，再在独占锁内原子写入 `sealed`。
+- 拒绝仓库评测目录外的数据集、符号链接和无效 JSON；失败不改动 registry，也不会调用模型或打开 holdout。
+- 这只是登记工具，不生成事故数据，也不能代替数据来源审批、脱敏复核和语义近似样本人工排查。
+
+## 0.4.9 资格门禁闭环
+
+- 资格评测的 CLI 退出码改由最终 `qualification_decision` 决定；campaign 门禁通过但资格被拒时，自动化流水线仍返回失败。
+- 资格接受条件补充每轮评测门禁均通过、汇总运行通过率为 100%；实验性放宽 campaign 阈值不能绕过单轮下游回归失败。
+- 新增对应回归测试并同步评测文档；本轮未重新运行真实 Ollama，也未重开已消费的 holdout。
+
+## 现有能力（至 0.11.0）
 
 - **调查编排**：`观察 -> 选择只读数据源 -> 查询 -> 更新证据 -> 诊断/升级人工`；
 - **有界执行**：限制最大步骤、查询次数、截止时间和重复动作；
@@ -28,8 +148,10 @@ SentinelOps 是一个证据优先、默认只读的事故调查 Agent。它围�
 - **模型资源保护**：Ollama 默认单并发槽位与 30 RPM 进程内滑动窗口；繁忙或超限时不排队，立即回退启发式策略，并输出固定低基数的接受率、回退原因和调用耗时指标。
 - **策略评测门禁**：60 条版本化用例比较启发式与受控模型来源选择，覆盖中英文变体、Prompt 注入、非法来源和故障回退；回放控制面门禁进入 CI，真实 Ollama 结果单独标注且不影响离线复现。
 - **评测可追溯性**：报告记录数据集/配置/Prompt SHA-256、SentinelOps/Python 版本、Ollama 模型标签与本地 digest；输出 15 组分项结果和来源混淆矩阵，CI 上传经过隐私扫描的 JSON 工件。
-- **防过拟合评测**：每个场景组固定拆成开发集与隐藏集各 2 条；开发集用于 Prompt 迭代，隐藏集只用于候选准入，避免在同一批答案上反复调参后宣称泛化收益。
+- **防过拟合评测**：旧 v1 的 `0.2` Schema 在每个场景组内拆分开发/隐藏变体，阻止直接复用同一文本，但不能保证事故级独立；新 `0.3` Schema 强制整起事故归入单一拆分，供后续独立标注数据使用。
 - **统计与有效性门禁**：按场景组执行 paired clustered bootstrap，报告 Top-1 提升的 95% 置信区间；真实模型调用成功率低于 95% 时直接判定无效，禁止把传输失败后的启发式回退算成模型效果。
+- **重复实验与稳定性门禁**：`policy-eval-campaign` 固定 Prompt、数据集和 holdout，连续运行 2–10 轮；每轮前后重新解析模型 digest，校验逐案例预测一致率、Top-1 极差、运行通过率与身份稳定性，并按轮隔离 Token/时延，报告首调用与稳态代理指标。
+- **评测集生命周期治理**：版本化 registry 固定数据集路径、指纹、拆分规模和 holdout 状态，并拒绝把已登记数据集的任何完全相同输入转入新 holdout、或将旧 holdout 转入新数据集；资格运行在推理前以独占锁执行 `sealed -> reserved`，评测完成后固化为 `consumed`，之后只能由完全相同的模型 digest 与 Prompt 身份做回归。
 
 ## 架构速览
 
@@ -57,7 +179,7 @@ SQLite: InvestigationStore + append-only AuditLog
 ## 本地运行
 
 ```powershell
-Set-Location D:\agents
+# 先切换到克隆的 SentinelOps 仓库根目录
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 
@@ -109,18 +231,40 @@ $env:SENTINELOPS_OLLAMA_RATE_LIMIT_RPM = "30"
   --min-model-success-rate 0.95 `
   --output policy-evaluation.json
 
-# 本机真实模型：结果只对当前模型、Prompt、数据集和硬件负责
+# 本机真实模型单次诊断：不具备候选资格裁决效力
 $env:SENTINELOPS_OLLAMA_MODEL = "qwen2.5:7b"
 $env:SENTINELOPS_OLLAMA_TIMEOUT_SECONDS = "30"
 $env:SENTINELOPS_OLLAMA_MAX_INFLIGHT = "1"
 $env:SENTINELOPS_OLLAMA_RATE_LIMIT_RPM = "100"
 .\.venv\Scripts\python.exe -m sentinelops policy-eval --mode ollama `
-  --split holdout --min-top1 1 --min-safety 1 --max-forbidden-rate 0 `
+  --split development --min-top1 1 --min-safety 1 --max-forbidden-rate 0 `
   --min-model-success-rate 0.95 `
   --output policy-evaluation-qwen.json
 ```
 
 本机 `qwen2.5:7b` 的 30 条隐藏集实测 Top-1 为 90%，高于启发式 66.67%；提升 23.33 个百分点，按 15 个场景组 bootstrap 的 95% 区间为 +3.33% 到 +46.67%。候选调用成功率、安全率均为 100%，越权执行为 0，下游 4/4 无回归；但 Top-1 仍未达到 100% 严格准入阈值，因此 `ollama` 保持实验开关、默认禁用。数据集、指标解释和复现实录见 [策略评测](docs/POLICY_EVALUATION.md)。
+
+`policy-eval` 的 live 单次运行只允许 development，用于开发诊断。资格与回归走受 registry 约束的 campaign。先验证登记的数据集指纹和生命周期：
+
+```powershell
+.\.venv\Scripts\python.exe -m sentinelops policy-eval-registry-check `
+  --registry evals/policy_eval_registry.json
+```
+
+当前公开 v1 holdout 已在 3 轮实验中使用并登记为 `consumed`，严格准入结论为 `rejected`。它只允许完全相同的模型 digest、Prompt ID/哈希做回归复现：
+
+```powershell
+.\.venv\Scripts\python.exe -m sentinelops policy-eval-campaign `
+  --purpose regression --dataset-id source-selection-public-v1 `
+  --runs 3 --min-top1 1 --min-model-success-rate 0.95 `
+  --min-run-pass-rate 1 --max-top1-spread 0.05 `
+  --min-prediction-stability 0.95 `
+  --output policy-evaluation-campaign.json
+```
+
+本机 3 轮实验阈值（`min-top1=0.85`）下，三轮 Top-1 均为 90%、逐案例预测一致率 100%、调用成功率和安全率均为 100%、越权执行 0；但同样 3 条首源误选稳定复现，所以这只是“稳定达到 90%”，仍不满足项目默认的 Top-1 100% 严格准入线。
+
+任何新 Prompt、模型或 digest 必须登记新的 `sealed` 数据集版本，再以 `--purpose qualification` 首次开封；资格命令必须使用完整 holdout、下游回归集及一个未被占用的 `--output` JSON 路径。程序会在推理前原子标记 `reserved`，评测后先保存预备报告再固化 `consumed`；即使中途崩溃也不会自动重开，旧 holdout 不能再次为新候选提供泛化证据。
 
 启动后可访问：
 
@@ -206,6 +350,8 @@ Compose 只把服务绑定到 `127.0.0.1`，并固定使用 `heuristic` 策略�
 
 默认 `SENTINELOPS_EVIDENCE_MODE=fixture`，不会访问任何外部系统。真实模式必须显式配置精确主机 allowlist 和只读凭据：
 
+真实任务、Provider 预检、独立数据、恢复与安全发布门槛见 [1.0 前发布资格验收](docs/RELEASE_READINESS.md)。当前版本仍为 0.11.0；没有获批真实事故样本和目标环境验收，不能宣称正式上线。
+
 ```powershell
 $env:SENTINELOPS_EVIDENCE_MODE = "observability"
 $env:SENTINELOPS_ALLOWED_OBSERVABILITY_HOSTS = "prometheus.internal,loki.internal,tempo.internal"
@@ -272,8 +418,8 @@ git config --local user.email "lin-or-feng@users.noreply.github.com"
 - 配置 `SENTINELOPS_AUDIT_KEY` 时使用 HMAC-SHA256，可发现不知道密钥的数据库篡改；
 - 未配置密钥时使用 `sha256-development`，只适合本地调试，数据库管理员可重算整条链；
 - 敏感字段按键名递归脱敏，并拦截常见 Bearer 与 `sk-` 形式的值；这不是通用 DLP；
-- 当前保证范围是**单进程写入**，Docker 固定 `--workers 1`。多副本部署需迁移 PostgreSQL，并用事务锁或独立审计写入器串行化；
-- 审计事件与调查结果同库但非同一原子事务；生产版需 outbox/事务事件方案。
+- 同一 SQLite 数据库中的**最终调查结果与完成审计事件**原子提交，多个审计实例的追加由 SQLite 写锁串行化；这不等于整个调查过程或外部 Provider 调用具有端到端事务；
+- 运行状态、派工/Evidence 账本和过程审计仍分别提交。Docker 仍固定 `--workers 1`；多副本部署还需 PostgreSQL、跨副本配额、租约/恢复、备份演练与独立审计归档，不能据此宣称生产级高可用。
 
 完整边界见 [安全审计报告](docs/SECURITY_AUDIT.md)。
 
@@ -294,7 +440,24 @@ git config --local user.email "lin-or-feng@users.noreply.github.com"
 13. **0.4.4 策略评测门禁**：版本化 60 条来源选择集、启发式/模型对照、安全回退、Token/时延统计和真实 Ollama 准入判定（完成；当前 7B 未过严格阈值）。
 14. **0.4.5 可追溯评测工件**：数据集/Prompt/配置哈希、Ollama digest、分组结果、混淆矩阵、原子化隐私门禁报告和 CI Artifact（完成）。
 15. **0.4.6 防过拟合与统计准入**：开发/隐藏集隔离、按场景组 paired bootstrap 置信区间、真实模型调用成功率门禁和无效实验识别（完成；当前 7B 隐藏集仍未过严格阈值）。
-16. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO 执行、备份恢复和人工审批。
+16. **0.4.7 重复实验稳定性**：固定身份的 2–10 轮 holdout campaign、逐案例预测一致率、Top-1 极差/运行通过率门禁、每轮 Token 隔离和首调用/稳态时延代理（完成；当前 7B 稳定为 90%）。
+17. **0.4.8 评测集生命周期**：数据集 registry、指纹/拆分校验、`sealed -> reserved -> consumed` 原子资格边界和同身份回归授权（完成；公开 v1 已消费且资格拒绝）。
+18. **0.4.9 资格门禁闭环**：CLI 成功码绑定最终资格结论，每轮门禁与 100% 运行通过率不可被活动阈值放宽绕过（完成）。
+19. **0.4.10 新评测集登记**：经人工审批的 JSON 可经 CLI 做隐私、契约、指纹与隐藏输入去重检查后，原子登记为 sealed；真实新数据集尚待建设（工具完成，数据未完成）。
+20. **0.4.11 资格证据先落盘**：强制新报告路径，先保存 reservation 身份与活动结果，再消费 holdout；失败时保留预备报告并准确提示状态（完成）。
+21. **0.4.12 事故级隔离与开发集 Prompt 对照**：兼容 Schema `0.3`、公开来源候选池、v1–v4 Prompt 身份隔离及 development 对照；v4 尚未通过严格资格，默认不启用（阶段完成，独立数据待建）。
+22. **0.4.13 开发报告逐案例对照**：双向跨版本隐藏输入防复用、同身份 development 报告比较与案例级退步揭示（完成；新独立数据仍待建）。
+23. **0.4.14 下游同源对比**：报告记录夹具指纹，只对同夹具、同运行版本的开发实验计算下游差值；v1/v4 同源实测下游均为 4/4（完成）。
+24. **0.4.15 多 Agent 冲突裁决**：Reviewer 对可信竞争根因拒绝草率定论，Supervisor 用剩余预算补证据或升级人工，原因码进入审计（完成）。
+25. **0.4.16 证据身份完整性**：不同内容的同名 Evidence 不再静默覆盖，Reviewer 阻断并升级人工，Supervisor 立即停止后续派工（完成）。
+26. **0.5.0 多 Agent 状态框架**：持久化 Assignment 生命周期、非法转移拒绝、Supervisor 接入、来源计划规范化；尚不自动恢复（框架完成）。
+27. **0.6.0 模型辅助 Specialist 影子运行**：严格假设契约、角色级最小证据上下文、只读/无裁决权限、元数据对照和安全回退（框架完成；真实事故准入评测未完成）。
+28. **0.7.0 影子评测与准入框架**：开发标签契约、事故级覆盖、模型/Prompt 身份核对、逐角色准确率与安全/Token/时延报告已落地；独立人工数据、holdout 治理和跨运行稳定性仍未完成，默认不提升模型权限（框架完成、生产准入未完成）。
+29. **0.8.0 独立资格评测框架**：事故级封存数据、原子预留/消费、重复影子运行、稳定性/成本/安全门禁和失败证据报告已落地；真实独立数据与人工审批真实性仍待建设，不自动升权（框架完成）。
+30. **0.9.0 本地可视化验收**：隔离合成夹具、三种编排方式、逐例闭环门禁、派工/证据/Trace/审计透视与本机访问边界（完成；不代表真实模型质量）。
+31. **0.10.0 公开事故候选预检**：只读元数据清单、时间点证据/分类适配/人工复核缺口阻断；两条公开候选均未获准，独立数据仍待建设（预检完成，P1 未完成）。
+32. **0.11.0 只读 AI 辅助解释**：在合成验证台按运行/事故绑定单轮追问，复用 loopback Ollama、限流/并发/响应边界，不改变确定性裁决（预览完成，真实诊断授权未完成）。
+33. **1.0 多租户服务**：PostgreSQL、OIDC/RBAC、异步任务、OpenTelemetry、SLO 执行、备份恢复和人工审批；优先级与先决条件见[下一阶段计划](docs/NEXT_PHASE_PRIORITIES.md)。
 
 多 Agent 当前作为可选模式保留：只有当真实 Provider 压测证明时延收益高于额外查询成本，才应在部署中改为默认。模型策略同样必须通过固定评测和回退测试后才能进入默认路径。
 

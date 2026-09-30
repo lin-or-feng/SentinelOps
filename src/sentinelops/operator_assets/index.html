@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SentinelOps · 本机真实调查台</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header><div class="brand"><span class="mark">S</span><div><strong>SentinelOps</strong><small>本机真实调查台 · 只读 Pilot</small></div></div><span class="mode">REAL DATA · 非演示</span></header>
+    <main>
+      <div class="hero"><p class="eyebrow">01 / OPERATOR DESK</p><h1>先检查来源，再调查事故。</h1><p>此页面只连接已配置的只读监控来源。AI 不参与最终裁决；证据不足时交由人工处理。请勿在公共电脑或未经授权的环境使用。</p></div>
+      <div id="notice" class="notice">输入本机 API Token，查看运行状态。</div>
+      <div class="grid">
+        <section class="panel">
+          <div class="panel-head"><span>01</span><h2>连接与任务</h2></div>
+          <label>本机 API Token <input id="token" type="password" autocomplete="off" placeholder="SENTINELOPS_API_TOKEN"></label>
+          <button id="connect" type="button" class="secondary">检查本机配置</button>
+          <p id="status" class="small">未连接。Token 仅保存在当前页面内存中，不写入浏览器存储。</p>
+          <form id="task-form">
+            <div class="pair"><label>事故 ID <input id="incident-id" required minlength="3" maxlength="120" placeholder="inc-pilot-001"></label><label>租户标识 <input id="tenant-id" required maxlength="120" placeholder="pilot"></label></div>
+            <label>服务标识 <input id="service" required maxlength="120" placeholder="order-service"></label>
+            <label>事故起点（本机时区） <input id="started-at" type="datetime-local" required></label>
+            <label>症状（每行一条，最多 20 条） <textarea id="symptoms" rows="3" required placeholder="HTTP 5xx rate increased"></textarea></label>
+            <div class="pair"><label>截止秒数 <input id="deadline" type="number" min="1" max="300" value="30" required></label><label>查询预算 <input id="budget" type="number" min="1" max="100" value="8" required></label></div>
+            <button id="check" type="submit" disabled>检查只读来源</button>
+            <button id="recover" type="button" class="secondary" disabled>按事故 ID 找回已保存结果</button>
+          </form>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><span>02</span><h2>预检与执行</h2></div>
+          <p class="small">预检对每个已配置来源执行一次限量读取，不保存证据正文，也不能证明证据与事故相关。</p>
+          <div id="checks" class="checks empty">尚未检查来源。</div>
+          <label class="confirm"><input id="confirm" type="checkbox" disabled> 我已确认这是获批的只读调查，且任务字段准确。</label>
+          <button id="run" type="button" class="danger" disabled>开始真实只读调查</button>
+          <p class="small">预检仅对完全相同的任务有效 5 分钟；执行一次后失效。新事故请使用新 ID。</p>
+        </section>
+      </div>
+      <section id="result" class="panel result" hidden>
+        <div class="panel-head"><span>03</span><h2>调查结果与审计</h2></div>
+        <div id="result-meta" class="result-meta"></div>
+        <div class="result-grid"><div><h3>证据引用</h3><div id="evidence-ids" class="list"></div><p class="small">本台不持久化或回显证据正文；请到原监控系统核对 ID 和时间窗。</p></div><div><h3>未解决问题</h3><div id="unresolved" class="list"></div></div>
+        <h3>执行 Trace</h3><div id="trace" class="list"></div>
+        <h3>审计事件</h3><div id="audit" class="list"></div>
+      </section>
+    </main>
+    <footer>SentinelOps · 本机单实例 Pilot · 不构成生产上线批准</footer>
+  </div>
+</body>
+</html>

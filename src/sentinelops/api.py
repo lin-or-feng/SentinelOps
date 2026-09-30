@@ -15,6 +15,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import JSONResponse
 
 from sentinelops import __version__
+from sentinelops.application.deployment_check import check_pilot_deployment
 from sentinelops.domain import IncidentTask, InvestigationResult
 from sentinelops.edge import (
     EdgeController,
@@ -44,6 +45,22 @@ def create_app(
     orchestration_mode: str | None = None,
     service_instance: SentinelOpsService | None = None,
 ) -> FastAPI:
+    deployment_profile = os.getenv("SENTINELOPS_DEPLOYMENT_PROFILE", "development")
+    if deployment_profile not in {"development", "pilot"}:
+        raise ValueError("unknown deployment profile")
+    if deployment_profile == "pilot":
+        if service_instance is not None:
+            raise ValueError("pilot deployment does not accept an injected service")
+        if audit_key is not None and audit_key != os.getenv("SENTINELOPS_AUDIT_KEY"):
+            raise ValueError("pilot audit key must match the checked environment")
+        if api_token is not None and api_token != os.getenv("SENTINELOPS_API_TOKEN"):
+            raise ValueError("pilot API token must match the checked environment")
+        deployment = check_pilot_deployment()
+        if not deployment["valid"]:
+            raise ValueError(
+                "pilot deployment preflight failed: "
+                + ", ".join(deployment["blockers"])
+            )
     resolved_dataset_path = dataset_path or os.getenv(
         "SENTINELOPS_DATASET_PATH", "evals/incidents.json"
     )

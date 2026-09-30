@@ -20,6 +20,8 @@ from sentinelops.model_policy import (
     OllamaSourceProposer,
     SOURCE_SELECTION_PROMPT_ID,
     SOURCE_SELECTION_SYSTEM_PROMPT,
+    SOURCE_SELECTION_V2_PROMPT_ID,
+    SOURCE_SELECTION_V2_SYSTEM_PROMPT,
     ollama_policy_config_from_env,
     source_selection_prompt_sha256,
 )
@@ -245,11 +247,49 @@ def test_ollama_adapter_uses_schema_non_streaming_and_temperature_zero() -> None
     system_prompt = captured["messages"][0]["content"]
     assert system_prompt == SOURCE_SELECTION_SYSTEM_PROMPT
     assert SOURCE_SELECTION_PROMPT_ID == "source-selection-v1"
-    assert len(source_selection_prompt_sha256()) == 64
+    assert source_selection_prompt_sha256() == (
+        "4c9aed3b627bdcefc15b5b25ac15b2fc16fb7509ae4dba34b48c585a9bcf02b9"
+    )
     observations = proposer.usage_observations()
     assert len(observations) == 1
     assert observations[0].prompt_tokens == 42
     assert observations[0].completion_tokens == 9
+
+
+def test_experimental_prompt_is_opt_in_and_has_distinct_identity() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"message": {"content": json.dumps({"source": "logs", "rationale": "inspect errors"})}},
+        )
+
+    config = ollama_policy_config_from_env(
+        {
+            "SENTINELOPS_OLLAMA_MODEL": "qwen2.5:7b",
+            "SENTINELOPS_OLLAMA_PROMPT_ID": SOURCE_SELECTION_V2_PROMPT_ID,
+        }
+    )
+    proposer = OllamaSourceProposer(config, transport=httpx.MockTransport(handler))
+    try:
+        proposer.propose(
+            ModelPolicyContext(
+                service="checkout-service",
+                symptoms=["application errors"],
+                available_sources=[EvidenceSource.LOGS],
+            )
+        )
+    finally:
+        proposer.close()
+
+    assert config.prompt_id == SOURCE_SELECTION_V2_PROMPT_ID
+    assert captured["messages"][0]["content"] == SOURCE_SELECTION_V2_SYSTEM_PROMPT
+    assert source_selection_prompt_sha256(SOURCE_SELECTION_V2_PROMPT_ID) != source_selection_prompt_sha256()
+    assert OllamaPolicyConfig(model="qwen2.5:7b").prompt_id == SOURCE_SELECTION_PROMPT_ID
+    with pytest.raises(ValueError, match="not a known prompt version"):
+        OllamaPolicyConfig(model="qwen2.5:7b", prompt_id="unreviewed-prompt")
 
 
 @pytest.mark.parametrize(
@@ -424,6 +464,19 @@ def test_service_rejects_invalid_policy_before_creating_database(tmp_path) -> No
 
     with pytest.raises(ValueError, match="policy_mode"):
         create_service(db_path=database, policy_mode="autonomous")
+
+    assert not database.exists()
+
+
+def test_service_rejects_experimental_prompt_before_creating_database(
+    tmp_path, monkeypatch
+) -> None:
+    database = tmp_path / "must-not-exist.db"
+    monkeypatch.setenv("SENTINELOPS_OLLAMA_MODEL", "qwen2.5:7b")
+    monkeypatch.setenv("SENTINELOPS_OLLAMA_PROMPT_ID", SOURCE_SELECTION_V2_PROMPT_ID)
+
+    with pytest.raises(ValueError, match="evaluation-only"):
+        create_service(db_path=database, policy_mode="ollama")
 
     assert not database.exists()
 
